@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { createOpencodeClient } from "@opencode-ai/sdk/client";
 import type { Agent, Event, Part, Session } from "@opencode-ai/sdk/client";
+import type { EventMessagePartDelta, EventPermissionAsked } from "@opencode-ai/sdk/v2/client";
 
 export interface ModelOption {
   providerId: string;
@@ -128,16 +129,17 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
   }
 
   async runPrompt(options: RunPromptOptions): Promise<string> {
+    const eventController = new AbortController();
     const subscription = await this.client.event.subscribe({
       query: { directory: options.directory },
-      signal: options.signal,
+      signal: AbortSignal.any([options.signal, eventController.signal]),
       sseMaxRetryAttempts: 1,
     });
     const iterator = subscription.stream[Symbol.asyncIterator]();
     const textParts = new Map<string, string>();
     const reasoningParts = new Map<string, string>();
     const assistantMessageIds = new Set<string>();
-    const messageId = randomUUID();
+    const messageId = `msg_${randomUUID()}`;
 
     const body: {
       parts: [{ type: "text"; text: string }];
@@ -171,7 +173,7 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
             throw new DOMException("The operation was aborted", "AbortError");
           throw new Error("OpenCode event stream closed before the response completed");
         }
-        const event = result.value as Event;
+        const event = result.value as Event | EventMessagePartDelta | EventPermissionAsked;
         if (event.type === "message.updated") {
           const message = event.properties.info;
           if (
@@ -180,7 +182,7 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
             message.parentID === messageId
           ) {
             assistantMessageIds.add(message.id);
-            if (message.time.completed) {
+            if (message.time.completed && message.finish !== "tool-calls") {
               return (
                 [...textParts.values()].join("\n\n").trim() ||
                 "OpenCode completed without a text response."
@@ -214,6 +216,39 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
               text: `Retry ${part.attempt}: ${part.error.data.message}`,
             });
           }
+        } else if (event.type === "message.part.delta") {
+          const delta = event.properties;
+          if (
+            delta.sessionID !== options.sessionId ||
+            !assistantMessageIds.has(delta.messageID) ||
+            delta.field !== "text"
+          )
+            continue;
+          if (textParts.has(delta.partID)) {
+            textParts.set(delta.partID, textParts.get(delta.partID)! + delta.delta);
+          } else if (reasoningParts.has(delta.partID)) {
+            reasoningParts.set(delta.partID, reasoningParts.get(delta.partID)! + delta.delta);
+            await options.onActivity({
+              type: "reasoning",
+              text: [...reasoningParts.values()].join("\n\n"),
+            });
+          }
+        } else if (
+          event.type === "permission.asked" &&
+          event.properties.sessionID === options.sessionId &&
+          (!event.properties.tool || assistantMessageIds.has(event.properties.tool.messageID))
+        ) {
+          await options.onActivity({
+            type: "permission",
+            request: {
+              id: event.properties.id,
+              sessionId: event.properties.sessionID,
+              title: event.properties.permission,
+              type: event.properties.permission,
+              pattern: event.properties.patterns,
+              metadata: event.properties.metadata,
+            },
+          });
         } else if (
           event.type === "permission.updated" &&
           event.properties.sessionID === options.sessionId &&
@@ -238,6 +273,7 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
         }
       }
     } finally {
+      eventController.abort();
       await iterator.return?.(undefined);
     }
   }
