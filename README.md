@@ -166,6 +166,24 @@ After a successful approval, the bot deletes the permission message; denials rem
 visible. Buttons are bound to the requesting user and can be used only once.
 Previously approved session-only decisions are not imported into the database.
 
+### Workspace permission profile
+
+[examples/workspace-permissions.json](examples/workspace-permissions.json) contains
+an optional permission profile for a worker whose workspace is mounted at
+`/workspace`. Merge its `permission` object into the worker's OpenCode configuration:
+
+- Allow ordinary tools and shell commands in the workspace.
+- Ask for paths outside `/workspace`, including when the current project is a subdirectory.
+- Ask before `read` or `edit` operations on `.env` and `.env.*` files, including examples.
+- Ask for shell commands mentioning `.env` and common SSH, SCP, SFTP, and remote rsync commands.
+
+These are OpenCode tool checks, not an operating-system sandbox. Indirect file
+access through scripts, content searches, alternate command syntax, or other
+network tools can bypass them. Keep the worker's existing container isolation and
+mount restrictions. An explicit **Allow always** decision can remember an exact
+request covered by these `ask` rules. The profile does not grant host filesystem
+access or supply remote server credentials.
+
 ## Production Isolation
 
 Run the controller and OpenCode under separate operating-system accounts:

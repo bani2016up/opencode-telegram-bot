@@ -1,0 +1,36 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "allow",
+    "external_directory": {
+      "*": "ask",
+      "/workspace": "allow",
+      "/workspace/*": "allow"
+    },
+    "read": {
+      "*": "allow",
+      "*.env": "ask",
+      "*.env.*": "ask"
+    },
+    "edit": {
+      "*": "allow",
+      "*.env": "ask",
+      "*.env.*": "ask"
+    },
+    "bash": {
+      "*": "allow",
+      "*.env*": "ask",
+      "ssh": "ask",
+      "*ssh *": "ask",
+      "scp": "ask",
+      "*scp *": "ask",
+      "sftp": "ask",
+      "*sftp *": "ask",
+      "sshpass *": "ask",
+      "*sshpass *": "ask",
+      "mosh *": "ask",
+      "*mosh *": "ask",
+      "*rsync *:*": "ask"
+    }
+  }
+}
