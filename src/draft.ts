@@ -1,5 +1,14 @@
 import type { Api, RawApi } from "grammy";
 
+const openingMessages = [
+  "Putting the rubber duck on the case…",
+  "Consulting the council of semicolons…",
+  "Waking the code gremlins…",
+  "Asking the bits to behave…",
+  "Giving the brain cells a quick pep talk…",
+  "Untangling the imaginary cables…",
+] as const;
+
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -7,7 +16,8 @@ function escapeHtml(value: string): string {
 export class ThinkingDraft {
   readonly draftId = Math.floor(Math.random() * 2_000_000_000) + 1;
   private timer: NodeJS.Timeout | undefined;
-  private pending = "Request received. Starting OpenCode…";
+  private pending: string =
+    openingMessages[Math.floor(Math.random() * openingMessages.length)] ?? openingMessages[0];
   private sent = "";
   private stopped = false;
 
