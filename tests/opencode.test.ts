@@ -242,6 +242,17 @@ const prompt = {
   onActivity: () => undefined,
 };
 
+describe("permission replies", () => {
+  it.each(["once", "always", "reject"] as const)(
+    "sends the %s decision to OpenCode",
+    async (response) => {
+      const test = await fixture(() => undefined);
+      await test.gateway.answerPermission("ses_test", "per_test", "/workspace", response);
+      expect(test.permissionReplies).toEqual([{ response }]);
+    },
+  );
+});
+
 describe("current OpenCode events", () => {
   it("accumulates text and reasoning deltas only for the current reply", async () => {
     const activities: PromptActivity[] = [];

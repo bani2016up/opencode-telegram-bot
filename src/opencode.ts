@@ -23,6 +23,7 @@ export interface PermissionRequest {
   title: string;
   type: string;
   pattern?: string | string[];
+  always?: string[];
   metadata: Record<string, unknown>;
 }
 
@@ -53,7 +54,7 @@ export interface OpenCodeGateway {
     sessionId: string,
     permissionId: string,
     directory: string,
-    response: "once" | "reject",
+    response: "once" | "always" | "reject",
   ): Promise<void>;
 }
 
@@ -246,6 +247,7 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
               title: event.properties.permission,
               type: event.properties.permission,
               pattern: event.properties.patterns,
+              always: event.properties.always,
               metadata: event.properties.metadata,
             },
           });
@@ -290,7 +292,7 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
     sessionId: string,
     permissionId: string,
     directory: string,
-    response: "once" | "reject",
+    response: "once" | "always" | "reject",
   ): Promise<void> {
     await this.client.postSessionIdPermissionsPermissionId({
       path: { id: sessionId, permissionID: permissionId },

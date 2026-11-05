@@ -54,7 +54,7 @@ interface PermissionPayload {
   sessionId: string;
   permissionId: string;
   directory: string;
-  response: "once" | "reject";
+  response: "once" | "always" | "reject";
 }
 
 interface UserPayload {
@@ -329,9 +329,18 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
           payload.directory,
           payload.response,
         );
-        await ctx.editMessageText(
-          payload.response === "once" ? "Permission approved once." : "Permission denied.",
-        );
+        if (payload.response === "reject") {
+          await ctx.editMessageText("Permission denied.");
+        } else {
+          try {
+            await ctx.deleteMessage();
+          } catch (error) {
+            dependencies.logger.warn("Could not remove an approved permission message", {
+              error: safeError(error),
+            });
+            await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+          }
+        }
         return;
       }
       case "admin.users": {
@@ -604,15 +613,20 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       directory,
       response: "once",
     };
+    const always: PermissionPayload = { ...allow, response: "always" };
     const deny: PermissionPayload = { ...allow, response: "reject" };
     const keyboard = new InlineKeyboard()
       .text("Allow once", action("permission.answer", allow, userId))
+      .text("Allow always", action("permission.answer", always, userId))
       .text("Deny", action("permission.answer", deny, userId));
     const pattern = request.pattern
       ? `\nPattern: ${Array.isArray(request.pattern) ? request.pattern.join(", ") : request.pattern}`
       : "";
+    const alwaysScope = request.always?.length
+      ? `\nAlways allows: ${request.always.join(", ")} (this session)`
+      : "";
     await ctx.reply(
-      `OpenCode requests permission\n\n${request.title}\nType: ${request.type}${pattern}`.slice(
+      `OpenCode requests permission\n\n${request.title}\nType: ${request.type}${pattern}${alwaysScope}`.slice(
         0,
         3500,
       ),

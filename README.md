@@ -152,7 +152,12 @@ Permission behavior remains controlled by OpenCode. To forward sensitive actions
 }
 ```
 
-The bot intentionally exposes only **Allow once** and **Deny**. It does not persist an “always allow” decision from Telegram.
+The bot exposes **Allow once**, **Allow always**, and **Deny**. **Allow always**
+approves future requests matching OpenCode's suggested patterns for the current
+OpenCode session. When available, these patterns are shown in the permission
+message. After a successful approval, the bot deletes the permission message;
+denials remain visible. Buttons are bound to the requesting user and can be used
+only once.
 
 ## Production Isolation
 
