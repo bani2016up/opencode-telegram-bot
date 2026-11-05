@@ -55,6 +55,8 @@ interface PermissionPayload {
   permissionId: string;
   directory: string;
   response: "once" | "always" | "reject";
+  permission?: string;
+  patterns?: string[];
 }
 
 interface UserPayload {
@@ -323,12 +325,30 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         return;
       case "permission.answer": {
         const payload = selected.payload as PermissionPayload;
+        if (
+          payload.response === "always" &&
+          (!payload.permission ||
+            !payload.patterns?.length ||
+            payload.patterns.some((pattern) => !pattern))
+        ) {
+          throw new Error(
+            "This older permission request cannot be remembered. Request a new approval.",
+          );
+        }
         await dependencies.opencode.answerPermission(
           payload.sessionId,
           payload.permissionId,
           payload.directory,
-          payload.response,
+          payload.response === "always" ? "once" : payload.response,
         );
+        if (payload.response === "always" && payload.permission && payload.patterns) {
+          dependencies.store.rememberPermission(
+            userId,
+            payload.directory,
+            payload.permission,
+            payload.patterns,
+          );
+        }
         if (payload.response === "reject") {
           await ctx.editMessageText("Permission denied.");
         } else {
@@ -606,24 +626,46 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     request: PermissionRequest,
     draft: ThinkingDraft,
   ): Promise<void> {
+    const patterns = request.pattern
+      ? Array.isArray(request.pattern)
+        ? request.pattern
+        : [request.pattern]
+      : [];
+    const canRemember = !!request.type && patterns.length > 0 && patterns.every(Boolean);
+    if (
+      authorized(userId) &&
+      dependencies.store.isPermissionRemembered(userId, directory, request.type, patterns)
+    ) {
+      await dependencies.opencode.answerPermission(
+        request.sessionId,
+        request.id,
+        directory,
+        "once",
+      );
+      return;
+    }
     draft.update(`Waiting for permission\n${request.title}`);
     const allow: PermissionPayload = {
       sessionId: request.sessionId,
       permissionId: request.id,
       directory,
       response: "once",
+      permission: request.type,
+      patterns,
     };
     const always: PermissionPayload = { ...allow, response: "always" };
     const deny: PermissionPayload = { ...allow, response: "reject" };
-    const keyboard = new InlineKeyboard()
-      .text("Allow once", action("permission.answer", allow, userId))
-      .text("Allow always", action("permission.answer", always, userId))
-      .text("Deny", action("permission.answer", deny, userId));
+    const keyboard = new InlineKeyboard().text(
+      "Allow once",
+      action("permission.answer", allow, userId),
+    );
+    if (canRemember) keyboard.text("Allow always", action("permission.answer", always, userId));
+    keyboard.text("Deny", action("permission.answer", deny, userId));
     const pattern = request.pattern
       ? `\nPattern: ${Array.isArray(request.pattern) ? request.pattern.join(", ") : request.pattern}`
       : "";
-    const alwaysScope = request.always?.length
-      ? `\nAlways allows: ${request.always.join(", ")} (this session)`
+    const alwaysScope = canRemember
+      ? "\nAllow always remembers these exact patterns for you in this workspace."
       : "";
     await ctx.reply(
       `OpenCode requests permission\n\n${request.title}\nType: ${request.type}${pattern}${alwaysScope}`.slice(

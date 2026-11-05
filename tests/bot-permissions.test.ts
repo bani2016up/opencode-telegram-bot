@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTelegramBot } from "../src/bot.js";
 import { parseConfig } from "../src/config.js";
-import type { OpenCodeGateway } from "../src/opencode.js";
+import type { OpenCodeGateway, PermissionRequest } from "../src/opencode.js";
 import { Store } from "../src/store.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -16,7 +16,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
-async function setup() {
+async function setup(overrides: Partial<PermissionRequest> = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "permission-buttons-")));
   const config = parseConfig({
     TELEGRAM_BOT_TOKEN: "111111:test-token-that-is-long-enough",
@@ -31,6 +31,16 @@ async function setup() {
   const pending = new Promise<void>((resolve) => {
     finish = resolve;
   });
+  const request: PermissionRequest = {
+    id: "per_test",
+    sessionId: "ses_test",
+    title: "bash",
+    type: "bash",
+    pattern: ["pwd"],
+    always: ["pwd *"],
+    metadata: {},
+    ...overrides,
+  };
   const opencode = {
     health: vi.fn<OpenCodeGateway["health"]>(),
     createSession: vi
@@ -44,15 +54,7 @@ async function setup() {
     runPrompt: vi.fn<OpenCodeGateway["runPrompt"]>().mockImplementation(async (options) => {
       await options.onActivity({
         type: "permission",
-        request: {
-          id: "per_test",
-          sessionId: "ses_test",
-          title: "bash",
-          type: "bash",
-          pattern: ["pwd"],
-          always: ["pwd *"],
-          metadata: {},
-        },
+        request,
       });
       await pending;
       return "Done";
@@ -113,8 +115,6 @@ async function setup() {
   await expect.poll(permission).toBeDefined();
   const markup = permission()!.payload.reply_markup as InlineKeyboardMarkup;
   const buttons = markup.inline_keyboard.flat();
-  expect(buttons.map((button) => button.text)).toEqual(["Allow once", "Allow always", "Deny"]);
-  expect(permission()!.payload.text).toContain("Always allows: pwd * (this session)");
   let updateId = 1;
   const click = async (label: string, userId = 111) => {
     const button = buttons.find((candidate) => candidate.text === label);
@@ -136,10 +136,66 @@ async function setup() {
     };
     await bot.handleUpdate(update);
   };
-  return { opencode, calls, failures, logger, click, directory };
+  const emitPermission = async (changes: Partial<PermissionRequest>) => {
+    await opencode.runPrompt.mock.calls[0]![0].onActivity({
+      type: "permission",
+      request: { ...request, ...changes },
+    });
+  };
+  return {
+    opencode,
+    calls,
+    failures,
+    logger,
+    click,
+    directory,
+    store,
+    buttons,
+    permission,
+    emitPermission,
+  };
 }
 
 describe("permission buttons", () => {
+  it("offers permanent approval for the displayed exact patterns", async () => {
+    const test = await setup();
+    expect(test.buttons.map((button) => button.text)).toEqual([
+      "Allow once",
+      "Allow always",
+      "Deny",
+    ]);
+    expect(test.permission()!.payload.text).toContain("Pattern: pwd");
+    expect(test.permission()!.payload.text).toContain("remembers these exact patterns");
+    expect(test.permission()!.payload.text).not.toContain("pwd *");
+  });
+
+  it.each([{ pattern: [] }, { pattern: [""] }])(
+    "does not offer permanent approval without concrete patterns: %j",
+    async (request) => {
+      const test = await setup(request);
+      expect(test.buttons.map((button) => button.text)).toEqual(["Allow once", "Deny"]);
+    },
+  );
+
+  it("automatically approves an exact saved request in a new session but asks for changed arguments", async () => {
+    const test = await setup();
+    await test.click("Allow always");
+    const messages = () => test.calls.filter((call) => call.method === "sendMessage").length;
+    const before = messages();
+    await test.emitPermission({ id: "per_next", sessionId: "ses_next" });
+    expect(test.opencode.answerPermission).toHaveBeenLastCalledWith(
+      "ses_next",
+      "per_next",
+      test.directory,
+      "once",
+    );
+    expect(test.opencode.answerPermission).toHaveBeenCalledTimes(2);
+    expect(messages()).toBe(before);
+    await test.emitPermission({ id: "per_changed", sessionId: "ses_next", pattern: ["pwd -P"] });
+    expect(test.opencode.answerPermission).toHaveBeenCalledTimes(2);
+    expect(messages()).toBe(before + 1);
+  });
+
   it.each([
     ["Allow once", "once"],
     ["Allow always", "always"],
@@ -153,7 +209,10 @@ describe("permission buttons", () => {
       "ses_test",
       "per_test",
       test.directory,
-      response,
+      "once",
+    );
+    expect(test.store.isPermissionRemembered(111, test.directory, "bash", ["pwd"])).toBe(
+      response === "always",
     );
     expect(test.calls.filter((call) => call.method === "deleteMessage")).toEqual([
       { method: "deleteMessage", payload: { chat_id: 111, message_id: 77 } },
@@ -183,6 +242,7 @@ describe("permission buttons", () => {
     test.opencode.answerPermission.mockRejectedValueOnce(new Error("OpenCode unavailable"));
     await expect(test.click("Allow always")).rejects.toThrow("OpenCode unavailable");
     expect(test.calls.some((call) => call.method === "deleteMessage")).toBe(false);
+    expect(test.store.isPermissionRemembered(111, test.directory, "bash", ["pwd"])).toBe(false);
   });
 
   it("removes the buttons if Telegram cannot delete the approved message", async () => {

@@ -1,8 +1,63 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { Store } from "../src/store.js";
 
 describe("Store", () => {
+  it("retains exact permission approvals after reopening the database", () => {
+    const directory = mkdtempSync(join(tmpdir(), "permission-store-"));
+    const databasePath = join(directory, "bot.sqlite");
+    let store = new Store(databasePath);
+    try {
+      store.rememberPermission(100, "/workspace", "bash", ["ssh example.invalid uptime"]);
+      store.close();
+      store = new Store(databasePath);
+      expect(
+        store.isPermissionRemembered(100, "/workspace", "bash", ["ssh example.invalid uptime"]),
+      ).toBe(true);
+      expect(
+        store.isPermissionRemembered(100, "/workspace", "bash", ["ssh example.invalid reboot"]),
+      ).toBe(false);
+      expect(
+        store.isPermissionRemembered(200, "/workspace", "bash", ["ssh example.invalid uptime"]),
+      ).toBe(false);
+      expect(
+        store.isPermissionRemembered(100, "/other", "bash", ["ssh example.invalid uptime"]),
+      ).toBe(false);
+      expect(
+        store.isPermissionRemembered(100, "/workspace", "read", ["ssh example.invalid uptime"]),
+      ).toBe(false);
+      expect(
+        store.isPermissionRemembered(100, "/workspace", "bash", [
+          "ssh example.invalid uptime",
+          "whoami",
+        ]),
+      ).toBe(false);
+      expect(store.isPermissionRemembered(100, "/workspace", "bash", [])).toBe(false);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("treats wildcard characters literally and requires every requested pattern", () => {
+    const store = new Store(":memory:");
+    try {
+      store.rememberPermission(100, "/workspace", "bash", ["echo *", "pwd"]);
+      expect(store.isPermissionRemembered(100, "/workspace", "bash", ["pwd", "echo *"])).toBe(true);
+      expect(store.isPermissionRemembered(100, "/workspace", "bash", ["echo secret"])).toBe(false);
+      expect(store.isPermissionRemembered(100, "/workspace", "bash", [""])).toBe(false);
+      expect(() => store.rememberPermission(100, "/workspace", "bash", [])).toThrow(
+        "concrete patterns",
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("authorizes and revokes users", () => {
     const store = new Store(":memory:");
     expect(store.isAuthorized(100)).toBe(false);

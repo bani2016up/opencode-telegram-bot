@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -259,6 +259,42 @@ export class Store {
     };
   }
 
+  rememberPermission(
+    userId: number,
+    directory: string,
+    permission: string,
+    patterns: string[],
+  ): void {
+    if (!permission || !patterns.length || patterns.some((pattern) => !pattern)) {
+      throw new Error("Cannot remember a permission without concrete patterns");
+    }
+    const insert = this.database.prepare(
+      `INSERT OR IGNORE INTO permission_approvals
+       (user_id, directory, permission, pattern_hash, approved_at) VALUES (?, ?, ?, ?, ?)`,
+    );
+    this.database.transaction(() => {
+      for (const pattern of patterns) {
+        insert.run(userId, directory, permission, permissionHash(pattern), Date.now());
+      }
+    })();
+  }
+
+  isPermissionRemembered(
+    userId: number,
+    directory: string,
+    permission: string,
+    patterns: string[],
+  ): boolean {
+    if (!permission || !patterns.length || patterns.some((pattern) => !pattern)) return false;
+    const query = this.database.prepare(
+      `SELECT 1 FROM permission_approvals
+       WHERE user_id = ? AND directory = ? AND permission = ? AND pattern_hash = ?`,
+    );
+    return patterns.every(
+      (pattern) => query.get(userId, directory, permission, permissionHash(pattern)) !== undefined,
+    );
+  }
+
   getChatState(userId: number, defaultDirectory: string): ChatState {
     const row = this.database.prepare("SELECT * FROM chat_state WHERE user_id = ?").get(userId) as
       ChatStateRow | undefined;
@@ -335,6 +371,14 @@ export class Store {
         expires_at INTEGER NOT NULL,
         used_at INTEGER
       );
+      CREATE TABLE IF NOT EXISTS permission_approvals (
+        user_id INTEGER NOT NULL,
+        directory TEXT NOT NULL,
+        permission TEXT NOT NULL,
+        pattern_hash TEXT NOT NULL,
+        approved_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, directory, permission, pattern_hash)
+      );
       CREATE TABLE IF NOT EXISTS chat_state (
         user_id INTEGER PRIMARY KEY,
         directory TEXT NOT NULL,
@@ -369,4 +413,8 @@ function mapChatState(row: ChatStateRow): ChatState {
     ...(row.agent ? { agent: row.agent } : {}),
     awaiting: row.awaiting,
   };
+}
+
+function permissionHash(pattern: string): string {
+  return createHash("sha256").update(pattern).digest("hex");
 }

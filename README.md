@@ -153,11 +153,18 @@ Permission behavior remains controlled by OpenCode. To forward sensitive actions
 ```
 
 The bot exposes **Allow once**, **Allow always**, and **Deny**. **Allow always**
-approves future requests matching OpenCode's suggested patterns for the current
-OpenCode session. When available, these patterns are shown in the permission
-message. After a successful approval, the bot deletes the permission message;
-denials remain visible. Buttons are bound to the requesting user and can be used
-only once.
+remembers the exact requested command or path patterns for the approving user and
+workspace in the controller database. Decisions survive new OpenCode sessions and
+bot restarts. Different commands, arguments, permission types, users, or workspaces
+require a separate approval. Every pattern in a request must already be approved
+before the bot answers automatically. Patterns are stored as hashes, not raw
+command text. The bot replies with `once` to OpenCode, avoiding its broader,
+temporary command-prefix approvals. Requests without concrete patterns only offer
+**Allow once** and **Deny**.
+
+After a successful approval, the bot deletes the permission message; denials remain
+visible. Buttons are bound to the requesting user and can be used only once.
+Previously approved session-only decisions are not imported into the database.
 
 ## Production Isolation
 
