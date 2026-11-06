@@ -179,6 +179,16 @@ describe("voice messages", () => {
     );
   });
 
+  it("accepts ten-minute voice notes up to the Telegram download limit", async () => {
+    const test = await setup();
+    await test.send({
+      voice: { file_id: "voice", file_unique_id: "unique", duration: 600, file_size: 20_000_000 },
+    });
+    await test.finished();
+    expect(test.transcriber.transcribe).toHaveBeenCalledOnce();
+    expect(test.opencode.runPrompt).toHaveBeenCalledOnce();
+  });
+
   it("uses an owner-bound model setting and falls back when a model is removed", async () => {
     const test = await setup();
     await test.send({ text: "/start" });
@@ -201,7 +211,7 @@ describe("voice messages", () => {
     const test = await setup();
     await test.voice(222);
     await test.voice(111, 10, "group");
-    await test.voice(111, 181);
+    await test.voice(111, 601);
     expect(test.calls.some((call) => call.method === "getFile")).toBe(false);
     expect(test.transcriber.transcribe).not.toHaveBeenCalled();
     expect(test.opencode.runPrompt).not.toHaveBeenCalled();

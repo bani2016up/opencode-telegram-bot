@@ -36,7 +36,8 @@ The transcript is plain prompt text, not a bot command. Existing OpenCode permis
 
 - Only authorized users can download or transcribe. Authorization is checked again before submitting a transcript.
 - One transcription runs at a time per controller. A second user gets a busy response rather than starting another model.
-- The sample configuration accepts at most 180 seconds and 10 MB, with a 240-second transcription deadline.
+- The sample configuration accepts up to 10 minutes (600 seconds), with a 15-minute transcription deadline.
+- The 20 MB size ceiling matches the [Telegram Bot API download limit](https://core.telegram.org/bots/api#getfile).
 - Both advertised and downloaded sizes are checked. Decoded duration is verified before inference.
 - FFmpeg accepts local files only. Child processes run without a shell and are killed on cancellation.
 - The model is loaded for one request, then released when the process exits. It is not kept resident.
@@ -44,7 +45,7 @@ The transcript is plain prompt text, not a bot command. Existing OpenCode permis
 - A container restart clears its temporary filesystem. Do not persist or back up `/tmp`.
 - Transcripts appear in Telegram and the OpenCode session. Audio, model output, and token-bearing download URLs are not logged.
 
-Allocate sufficient temporary space for compressed audio and 16 kHz mono WAV (about 5.8 MB for 180 seconds).
+Allocate sufficient temporary space for compressed audio and 16 kHz mono WAV (about 19.2 MB for 10 minutes).
 Use a container memory limit and CPU limit appropriate to the host. The entire controller, including Node and FFmpeg, counts toward that limit.
 Quality and latency depend on the model, accent, noise, and CPU. Compact models can misrecognize commands and technical names.
 
