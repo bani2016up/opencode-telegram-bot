@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
+import { loadTranscriptionConfig } from "./transcription-config.js";
 
 const positiveInteger = z.coerce.number().int().positive();
 
@@ -22,6 +23,7 @@ const schema = z.object({
   MAX_PROMPT_LENGTH: positiveInteger.default(12_000),
   STREAM_INTERVAL_MS: positiveInteger.default(500),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  TRANSCRIPTION_CONFIG: z.string().min(1).optional(),
 });
 
 export type AppConfig = ReturnType<typeof parseConfig>;
@@ -83,6 +85,7 @@ export function parseConfig(environment: NodeJS.ProcessEnv) {
     maxPromptLength: values.MAX_PROMPT_LENGTH,
     streamIntervalMs: values.STREAM_INTERVAL_MS,
     logLevel: values.LOG_LEVEL,
+    transcription: loadTranscriptionConfig(values.TRANSCRIPTION_CONFIG),
   } as const;
 }
 

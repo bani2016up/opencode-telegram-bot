@@ -15,11 +15,13 @@ import { discoverSkills, parseSkillInvocation, skillPrompt } from "./skills.js";
 import type { CallbackAction, ChatState } from "./store.js";
 import { Store } from "./store.js";
 import { resolveWorkspace } from "./workspaces.js";
+import type { Transcriber } from "./transcription.js";
 
 interface Dependencies {
   store: Store;
   opencode: OpenCodeGateway;
   logger: Logger;
+  transcriber?: Transcriber;
 }
 
 interface ActiveRun {
@@ -96,6 +98,9 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       .row()
       .text("Workspace", action("workspace.prompt", {}, userId))
       .text("Skills", action("skill.list", { page: 0 }, userId));
+    if (config.transcription && dependencies.transcriber) {
+      keyboard.row().text("Voice settings", action("transcription.list", { page: 0 }, userId));
+    }
     if (config.adminUserIds.has(userId)) {
       keyboard.row().text("Authorized users", action("admin.users", {}, userId));
     }
@@ -255,12 +260,49 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       "session.select",
       "model.select",
       "agent.select",
+      "transcription.select",
     ]);
     if (busyUsers.has(userId) && mutationActions.has(selected.kind)) {
       await ctx.reply("This setting cannot change while OpenCode is processing a request.");
       return;
     }
     switch (selected.kind) {
+      case "transcription.list": {
+        const settings = config.transcription;
+        if (!settings || !dependencies.transcriber) {
+          await ctx.reply("Voice transcription is not enabled.");
+          return;
+        }
+        const saved = dependencies.store.getTranscriptionModel(userId);
+        const current =
+          settings.models.find((model) => model.id === saved)?.id ?? settings.defaultModel;
+        await ctx.reply(
+          "Select a transcription model. Russian and English are detected automatically with the default language setting.",
+          {
+            reply_markup: pagedKeyboard(
+              settings.models,
+              (selected.payload as PagePayload).page,
+              (model) => `${model.id === current ? "✓ " : ""}${model.label}`,
+              (model) => action("transcription.select", { modelId: model.id }, userId),
+              (page) => action("transcription.list", { page }, userId),
+            ),
+          },
+        );
+        return;
+      }
+      case "transcription.select": {
+        const { modelId } = selected.payload as { modelId: string };
+        const model = config.transcription?.models.find((candidate) => candidate.id === modelId);
+        if (!model || !dependencies.transcriber) {
+          await ctx.reply(
+            "This transcription model is no longer available. Open Voice settings again.",
+          );
+          return;
+        }
+        dependencies.store.setTranscriptionModel(userId, model.id);
+        await ctx.reply(`Transcription model selected: ${model.label}`);
+        return;
+      }
       case "menu.status": {
         const version = await dependencies.opencode.health();
         await ctx.reply(
@@ -479,6 +521,82 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     });
   }
 
+  bot.on("message:voice", async (ctx) => {
+    const userId = privateUser(ctx);
+    if (!userId) return;
+    if (!authorized(userId)) {
+      await ctx.reply("Access is not approved. Send /start to request access.");
+      return;
+    }
+    const settings = config.transcription;
+    const transcriber = dependencies.transcriber;
+    if (!settings || !transcriber) {
+      await ctx.reply("Voice transcription is not enabled. Please send text.");
+      return;
+    }
+    if (busyUsers.has(userId)) {
+      await ctx.reply("A request is already running. Use Abort before sending another.");
+      return;
+    }
+    const voice = ctx.message.voice;
+    if (
+      voice.duration > settings.maxDurationSeconds ||
+      (voice.file_size ?? 0) > settings.maxFileBytes
+    ) {
+      await ctx.reply(
+        `Voice messages must be at most ${settings.maxDurationSeconds} seconds and ${Math.floor(settings.maxFileBytes / 1_000_000)} MB.`,
+      );
+      return;
+    }
+    busyUsers.add(userId);
+    try {
+      const state = await getValidatedState(userId);
+      if (state.awaiting === "workspace") {
+        busyUsers.delete(userId);
+        await ctx.reply("Send the workspace path as text before sending a voice message.");
+        return;
+      }
+      const saved = dependencies.store.getTranscriptionModel(userId);
+      const modelId =
+        settings.models.find((model) => model.id === saved)?.id ?? settings.defaultModel;
+      void processPrompt(ctx, userId, state, async (signal, draft) => {
+        draft.update("Listening to your voice message…");
+        let filePath: string | undefined;
+        try {
+          // grammY types its compatible AbortSignal shim separately from Node's signal.
+          const file = await bot.api.getFile(
+            voice.file_id,
+            signal as unknown as Parameters<typeof bot.api.getFile>[1],
+          );
+          filePath = file.file_path;
+        } catch {
+          signal.throwIfAborted();
+          throw new Error("Could not retrieve the voice message from Telegram.");
+        }
+        if (!filePath) throw new Error("Telegram did not provide an audio file.");
+        const text = (await transcriber.transcribe(filePath, modelId, signal)).trim();
+        signal.throwIfAborted();
+        if (!authorized(userId)) throw new Error("Access was revoked while transcribing.");
+        if (!text) throw new Error("No speech was recognized. Please try again or send text.");
+        if (text.length > config.maxPromptLength)
+          throw new Error(
+            `Transcript too long. The limit is ${config.maxPromptLength} characters.`,
+          );
+        for (const [index, chunk] of plainChunks(text).entries()) {
+          await ctx.reply(`${index === 0 ? "Heard:\n" : ""}${chunk}`, {
+            disable_notification: true,
+            ...(index === 0 ? { reply_parameters: { message_id: ctx.message.message_id } } : {}),
+          });
+        }
+        draft.update("Working on your request…");
+        return text;
+      }).catch(() => dependencies.logger.error("Voice request delivery failed", { userId }));
+    } catch (error) {
+      busyUsers.delete(userId);
+      throw error;
+    }
+  });
+
   bot.on("message:text", async (ctx) => {
     const userId = privateUser(ctx);
     if (!userId || /^\/start(?:@[a-zA-Z0-9_]+)?(?:\s|$)/u.test(ctx.message.text)) return;
@@ -493,6 +611,10 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       return;
     }
     const state = await getValidatedState(userId);
+    if (busyUsers.has(userId)) {
+      await ctx.reply("A request is already running. Use Abort before sending another.");
+      return;
+    }
     if (state.awaiting === "workspace") {
       await handleWorkspaceInput(ctx, userId, ctx.message.text);
       return;
@@ -511,6 +633,10 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         return;
       }
       prompt = skillPrompt(invocation.skill, invocation.arguments);
+    }
+    if (busyUsers.has(userId)) {
+      await ctx.reply("A request is already running. Use Abort before sending another.");
+      return;
     }
     busyUsers.add(userId);
     void processPrompt(ctx, userId, state, prompt);
@@ -544,20 +670,22 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     ctx: Context,
     userId: number,
     initialState: ChatState,
-    prompt: string,
+    prompt: string | ((signal: AbortSignal, draft: ThinkingDraft) => Promise<string>),
   ): Promise<void> {
     const draft = new ThinkingDraft(bot.api, userId, config.streamIntervalMs);
     const controller = new AbortController();
     activeRuns.set(userId, {
       controller,
       directory: initialState.directory,
-      sessionId: initialState.sessionId,
+      sessionId: typeof prompt === "string" ? initialState.sessionId : undefined,
       draftId: draft.draftId,
     });
     let state = initialState;
     let lockedSessionId: string | undefined;
     try {
       await draft.start();
+      const text = typeof prompt === "string" ? prompt : await prompt(controller.signal, draft);
+      controller.signal.throwIfAborted();
       if (!state.sessionId) {
         const session = await dependencies.opencode.createSession(state.directory);
         if (controller.signal.aborted)
@@ -582,7 +710,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       const final = await dependencies.opencode.runPrompt({
         sessionId,
         directory: state.directory,
-        text: prompt,
+        text,
         selection: {
           ...(state.providerId ? { providerId: state.providerId } : {}),
           ...(state.modelId ? { modelId: state.modelId } : {}),

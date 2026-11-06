@@ -106,6 +106,22 @@ export class Store {
     this.database.close();
   }
 
+  getTranscriptionModel(userId: number): string | undefined {
+    const row = this.database
+      .prepare("SELECT model_id FROM transcription_preferences WHERE user_id = ?")
+      .get(userId) as { model_id: string } | undefined;
+    return row?.model_id;
+  }
+
+  setTranscriptionModel(userId: number, modelId: string): void {
+    this.database
+      .prepare(
+        `INSERT INTO transcription_preferences (user_id, model_id) VALUES (?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET model_id = excluded.model_id`,
+      )
+      .run(userId, modelId);
+  }
+
   isAuthorized(userId: number): boolean {
     const row = this.database
       .prepare("SELECT 1 FROM authorized_users WHERE user_id = ? AND revoked_at IS NULL")
@@ -345,6 +361,10 @@ export class Store {
 
   private migrate(): void {
     this.database.exec(`
+      CREATE TABLE IF NOT EXISTS transcription_preferences (
+        user_id INTEGER PRIMARY KEY,
+        model_id TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS authorized_users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,

@@ -122,7 +122,8 @@ Administrators must open the bot and send `/start` once before Telegram allows t
 3. An administrator approves the immutable numeric user ID.
 4. The user sends `/start` again to open the control menu.
 5. Ordinary text is sent to the selected OpenCode session.
-6. `/skill_name optional request` explicitly asks OpenCode to load that skill.
+6. With [local voice transcription](docs/voice.md) enabled, voice notes are transcribed and sent to the same session. Choose a model in `/start` → **Voice settings**.
+7. `/skill_name optional request` explicitly asks OpenCode to load that skill.
 
 OpenCode skill names may contain hyphens, while Telegram commands may not. The bot maps hyphens to underscores, truncates commands longer than 32 characters with a stable hash, and handles collisions. The command menu is refreshed whenever the workspace changes. Use the Skills button to see all discovered skills; Telegram displays at most 100 registered commands.
 
@@ -220,7 +221,7 @@ Tests cover authorization persistence, callback replay protection, workspace con
 - Private Telegram chats only
 - Long polling only; no inbound public HTTP endpoint
 - One active OpenCode operation per approved user
-- Text prompts and responses only
+- Text prompts and responses; optional local voice transcription ([setup](docs/voice.md))
 - No provider credential entry through Telegram
 - No generic shell or PTY endpoint
 - No protection against compromise of the approved Telegram account

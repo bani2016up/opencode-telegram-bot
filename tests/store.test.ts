@@ -13,8 +13,11 @@ describe("Store", () => {
     let store = new Store(databasePath);
     try {
       store.rememberPermission(100, "/workspace", "bash", ["ssh example.invalid uptime"]);
+      store.setTranscriptionModel(100, "custom-model");
       store.close();
       store = new Store(databasePath);
+      expect(store.getTranscriptionModel(100)).toBe("custom-model");
+      expect(store.getTranscriptionModel(200)).toBeUndefined();
       expect(
         store.isPermissionRemembered(100, "/workspace", "bash", ["ssh example.invalid uptime"]),
       ).toBe(true);

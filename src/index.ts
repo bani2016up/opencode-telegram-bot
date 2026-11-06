@@ -4,6 +4,7 @@ import { PollingHealth, startHealthServer } from "./health.js";
 import { createLogger } from "./logger.js";
 import { SdkOpenCodeGateway } from "./opencode.js";
 import { Store } from "./store.js";
+import { LocalTranscriber } from "./transcription.js";
 
 const config = loadConfig();
 const logger = createLogger(config.logLevel);
@@ -13,7 +14,16 @@ const opencode = new SdkOpenCodeGateway(
   config.opencodeUsername,
   config.opencodePassword,
 );
-const bot = createTelegramBot(config, { store, opencode, logger });
+const transcriber = config.transcription
+  ? new LocalTranscriber(config.transcription, config.telegramToken)
+  : undefined;
+await transcriber?.validateModels();
+const bot = createTelegramBot(config, {
+  store,
+  opencode,
+  logger,
+  ...(transcriber ? { transcriber } : {}),
+});
 const health = new PollingHealth();
 bot.api.config.use(health.track);
 const healthServer = await startHealthServer(health, process.env.HEALTH_PORT);
