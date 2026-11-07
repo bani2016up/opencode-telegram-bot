@@ -37,6 +37,7 @@ export interface RunPromptOptions {
   sessionId: string;
   directory: string;
   text: string;
+  sourceId?: string;
   selection: PromptSelection;
   signal: AbortSignal;
   onActivity(activity: PromptActivity): Promise<void> | void;
@@ -147,7 +148,11 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
       messageID: string;
       model?: { providerID: string; modelID: string };
       agent?: string;
+      system?: string;
     } = { messageID: messageId, parts: [{ type: "text", text: options.text }] };
+    if (options.sourceId) {
+      body.system = `Trusted request reference: ${options.sourceId}. When a tool requires a stable operation source_id, append :1, :2, etc. for items in this request and reuse those IDs on retries.`;
+    }
     if (options.selection.providerId && options.selection.modelId) {
       body.model = {
         providerID: options.selection.providerId,

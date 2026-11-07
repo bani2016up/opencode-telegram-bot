@@ -711,6 +711,9 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         sessionId,
         directory: state.directory,
         text,
+        ...(ctx.chat && ctx.message
+          ? { sourceId: `telegram:${ctx.chat.id}:${ctx.message.message_id}` }
+          : {}),
         selection: {
           ...(state.providerId ? { providerId: state.providerId } : {}),
           ...(state.modelId ? { modelId: state.modelId } : {}),

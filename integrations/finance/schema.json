@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "headers": [
+    "Date",
+    "Type",
+    "Amount",
+    "Currency",
+    "Category",
+    "Account",
+    "To account",
+    "Note",
+    "Operation ID",
+    "Recorded at",
+    "Source",
+    "Receipt hash"
+  ],
+  "categories": {
+    "Expense": [
+      "Groceries",
+      "Eating out",
+      "Housing",
+      "Utilities",
+      "Transport",
+      "Health",
+      "Shopping",
+      "Entertainment",
+      "Travel",
+      "Education",
+      "Subscriptions",
+      "Server",
+      "Gifts",
+      "Other"
+    ],
+    "Income": ["Salary", "Freelance", "Other income"],
+    "Transfer": ["Internal transfer"]
+  },
+  "currencies": ["RUB", "EUR", "USD"]
+}

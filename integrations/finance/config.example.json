@@ -1,0 +1,13 @@
+{
+  "spreadsheet_id": "REPLACE_WITH_SPREADSHEET_ID",
+  "credentials_file": "/run/secrets/prfnv-finance-google.json",
+  "state_directory": "/home/agent/.local/state/prfnv-finance",
+  "files_directory": "/workspace/finance",
+  "default_currency": "RUB",
+  "timezone": "Europe/Moscow",
+  "transactions_sheet": "Transactions",
+  "categories_sheet": "Categories",
+  "dashboard_sheet": "Dashboard",
+  "max_rows": 5000,
+  "retry_seconds": 60
+}

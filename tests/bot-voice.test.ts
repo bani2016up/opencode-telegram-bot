@@ -168,6 +168,7 @@ describe("voice messages", () => {
         sessionId: "existing-session",
         directory: test.directory,
         text: "Проверь сервер. Check Docker.",
+        sourceId: "telegram:111:1",
         selection: expect.objectContaining({ modelId: "agent-model" }),
       }),
     );
@@ -224,6 +225,7 @@ describe("voice messages", () => {
     await test.send({ text: "Plain text" });
     await test.finished();
     expect(test.opencode.runPrompt.mock.calls[0]![0].text).toBe("Plain text");
+    expect(test.opencode.runPrompt.mock.calls[0]![0].sourceId).toBe("telegram:111:2");
   });
 
   it("cancels transcription through Abort without submitting a prompt or aborting an idle agent session", async () => {

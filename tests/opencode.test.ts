@@ -30,6 +30,7 @@ describe("SdkOpenCodeGateway", () => {
     let stream: ServerResponse | undefined;
     let streamAuthenticated = false;
     let streamClosed = false;
+    let submittedSystem: string | undefined;
     const server = createServer(async (request, response) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (request.headers.authorization !== expectedAuthorization) {
@@ -54,7 +55,11 @@ describe("SdkOpenCodeGateway", () => {
       if (url.pathname === "/session/session-1/prompt_async") {
         const chunks: Buffer[] = [];
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
-        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { messageID: string };
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+          messageID: string;
+          system?: string;
+        };
+        submittedSystem = body.system;
         if (!body.messageID.startsWith("msg")) {
           response.writeHead(400, { "content-type": "application/json" });
           response.end(JSON.stringify({ message: "Expected a message ID starting with msg" }));
@@ -140,6 +145,7 @@ describe("SdkOpenCodeGateway", () => {
       sessionId: "session-1",
       directory: "/workspace",
       text: "test",
+      sourceId: "telegram:111:123",
       selection: {},
       signal: new AbortController().signal,
       onActivity: () => undefined,
@@ -147,6 +153,7 @@ describe("SdkOpenCodeGateway", () => {
 
     expect(streamAuthenticated).toBe(true);
     expect(result).toBe("expected answer");
+    expect(submittedSystem).toContain("Trusted request reference: telegram:111:123.");
     await expect.poll(() => streamClosed).toBe(true);
   }, 10_000);
 });
