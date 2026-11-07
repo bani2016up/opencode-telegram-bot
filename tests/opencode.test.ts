@@ -31,6 +31,7 @@ describe("SdkOpenCodeGateway", () => {
     let streamAuthenticated = false;
     let streamClosed = false;
     let submittedSystem: string | undefined;
+    let submittedParts: unknown;
     const server = createServer(async (request, response) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (request.headers.authorization !== expectedAuthorization) {
@@ -58,8 +59,10 @@ describe("SdkOpenCodeGateway", () => {
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
           messageID: string;
           system?: string;
+          parts: unknown;
         };
         submittedSystem = body.system;
+        submittedParts = body.parts;
         if (!body.messageID.startsWith("msg")) {
           response.writeHead(400, { "content-type": "application/json" });
           response.end(JSON.stringify({ message: "Expected a message ID starting with msg" }));
@@ -145,6 +148,7 @@ describe("SdkOpenCodeGateway", () => {
       sessionId: "session-1",
       directory: "/workspace",
       text: "test",
+      images: [{ mime: "image/png", filename: "image.png", url: "data:image/png;base64,aW1hZ2U=" }],
       sourceId: "telegram:111:123",
       selection: {},
       signal: new AbortController().signal,
@@ -154,6 +158,15 @@ describe("SdkOpenCodeGateway", () => {
     expect(streamAuthenticated).toBe(true);
     expect(result).toBe("expected answer");
     expect(submittedSystem).toContain("Trusted request reference: telegram:111:123.");
+    expect(submittedParts).toEqual([
+      { type: "text", text: "test" },
+      {
+        type: "file",
+        mime: "image/png",
+        filename: "image.png",
+        url: "data:image/png;base64,aW1hZ2U=",
+      },
+    ]);
     await expect.poll(() => streamClosed).toBe(true);
   }, 10_000);
 });

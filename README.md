@@ -22,6 +22,19 @@ The bot provides Telegram-native authorization, Rich Message streaming, workspac
 - Safe workspace resolution without interpolating paths into shell commands
 - Missing-path diagnostics that list the deepest existing directory
 - Private chats only, one active operation per user, and prompt length limits
+- Photos and JPEG, PNG, or WebP image documents sent to the selected model with their captions
+
+## Images
+
+Send one image with a caption describing the task. Photos use the largest Telegram-provided resolution.
+JPEG, PNG, and WebP documents are accepted up to the [Telegram download limit](https://core.telegram.org/bots/api#getfile) of 20 MB.
+The controller verifies the file signature and sends a data attachment through OpenCode's existing authenticated connection.
+The selected model must support image input. No separate OCR service or API key is required.
+
+Without a caption, the agent is asked to describe the image. Send images individually; albums are not combined into one request.
+Access checks, the selected session/workspace/model, Abort, and stable Telegram operation references also apply to images.
+Files are downloaded into memory without a controller-side disk copy. OpenCode's conversation history may retain attachments.
+Unsupported or failed downloads return an error instead of being silently ignored.
 
 ## Architecture
 

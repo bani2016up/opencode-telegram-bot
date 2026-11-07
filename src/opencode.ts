@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import { createOpencodeClient } from "@opencode-ai/sdk/client";
 import type { Agent, Event, Part, Session } from "@opencode-ai/sdk/client";
+import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/client";
 import type { EventMessagePartDelta, EventPermissionAsked } from "@opencode-ai/sdk/v2/client";
+
+import type { ImageAttachment } from "./images.js";
 
 export interface ModelOption {
   providerId: string;
@@ -37,6 +40,7 @@ export interface RunPromptOptions {
   sessionId: string;
   directory: string;
   text: string;
+  images?: ImageAttachment[];
   sourceId?: string;
   selection: PromptSelection;
   signal: AbortSignal;
@@ -144,12 +148,18 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
     const messageId = `msg_${randomUUID()}`;
 
     const body: {
-      parts: [{ type: "text"; text: string }];
+      parts: Array<TextPartInput | FilePartInput>;
       messageID: string;
       model?: { providerID: string; modelID: string };
       agent?: string;
       system?: string;
-    } = { messageID: messageId, parts: [{ type: "text", text: options.text }] };
+    } = {
+      messageID: messageId,
+      parts: [
+        { type: "text", text: options.text },
+        ...(options.images ?? []).map((image): FilePartInput => ({ type: "file", ...image })),
+      ],
+    };
     if (options.sourceId) {
       body.system = `Trusted request reference: ${options.sourceId}. When a tool requires a stable operation source_id, append :1, :2, etc. for items in this request and reuse those IDs on retries.`;
     }

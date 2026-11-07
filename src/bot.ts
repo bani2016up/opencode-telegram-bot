@@ -3,6 +3,8 @@ import type { Context } from "grammy";
 
 import type { AppConfig } from "./config.js";
 import { ThinkingDraft } from "./draft.js";
+import { MAX_IMAGE_BYTES, TelegramImageLoader } from "./images.js";
+import type { ImageAttachment, ImageLoader } from "./images.js";
 import type { Logger } from "./logger.js";
 import { sanitizeRichMarkdown, splitRichMarkdown } from "./markdown.js";
 import type {
@@ -22,6 +24,7 @@ interface Dependencies {
   opencode: OpenCodeGateway;
   logger: Logger;
   transcriber?: Transcriber;
+  imageLoader?: ImageLoader;
 }
 
 interface ActiveRun {
@@ -72,6 +75,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
   const activeRuns = new Map<number, ActiveRun>();
   const busyUsers = new Set<number>();
   const activeSessionIds = new Set<string>();
+  const imageLoader = dependencies.imageLoader ?? new TelegramImageLoader(config.telegramToken);
 
   const authorized = (userId: number) =>
     config.adminUserIds.has(userId) || dependencies.store.isAuthorized(userId);
@@ -597,6 +601,65 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     }
   });
 
+  bot.on(["message:photo", "message:document"], async (ctx) => {
+    const userId = privateUser(ctx);
+    if (!userId) return;
+    if (!authorized(userId)) {
+      await ctx.reply("Access is not approved. Send /start to request access.");
+      return;
+    }
+    if (busyUsers.has(userId)) {
+      await ctx.reply("A request is already running. Use Abort before sending another.");
+      return;
+    }
+    const photo = ctx.message.photo?.reduce((largest, candidate) =>
+      candidate.width * candidate.height > largest.width * largest.height ? candidate : largest,
+    );
+    const attachment = photo ?? ctx.message.document;
+    if (!attachment) return;
+    if ((attachment.file_size ?? 0) > MAX_IMAGE_BYTES) {
+      await ctx.reply("Images must be at most 20 MB.");
+      return;
+    }
+    const text = ctx.message.caption?.trim() || "Describe this image.";
+    if (text.length > config.maxPromptLength) {
+      await ctx.reply(`Prompt too long. The limit is ${config.maxPromptLength} characters.`);
+      return;
+    }
+    busyUsers.add(userId);
+    try {
+      const state = await getValidatedState(userId);
+      if (state.awaiting === "workspace") {
+        busyUsers.delete(userId);
+        await ctx.reply("Send the workspace path as text before sending an image.");
+        return;
+      }
+      void processPrompt(ctx, userId, state, async (signal, draft) => {
+        draft.update("Opening your image…");
+        let filePath: string | undefined;
+        try {
+          const file = await bot.api.getFile(
+            attachment.file_id,
+            signal as unknown as Parameters<typeof bot.api.getFile>[1],
+          );
+          filePath = file.file_path;
+        } catch {
+          signal.throwIfAborted();
+          throw new Error("Could not retrieve the image from Telegram.");
+        }
+        if (!filePath) throw new Error("Telegram did not provide an image file.");
+        const image = await imageLoader.load(filePath, signal);
+        signal.throwIfAborted();
+        if (!authorized(userId)) throw new Error("Access was revoked while downloading.");
+        draft.update("Working on your image…");
+        return { text, images: [image] };
+      }).catch(() => dependencies.logger.error("Image request delivery failed", { userId }));
+    } catch (error) {
+      busyUsers.delete(userId);
+      throw error;
+    }
+  });
+
   bot.on("message:text", async (ctx) => {
     const userId = privateUser(ctx);
     if (!userId || /^\/start(?:@[a-zA-Z0-9_]+)?(?:\s|$)/u.test(ctx.message.text)) return;
@@ -670,7 +733,12 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     ctx: Context,
     userId: number,
     initialState: ChatState,
-    prompt: string | ((signal: AbortSignal, draft: ThinkingDraft) => Promise<string>),
+    prompt:
+      | string
+      | ((
+          signal: AbortSignal,
+          draft: ThinkingDraft,
+        ) => Promise<string | { text: string; images: ImageAttachment[] }>),
   ): Promise<void> {
     const draft = new ThinkingDraft(bot.api, userId, config.streamIntervalMs);
     const controller = new AbortController();
@@ -684,7 +752,8 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     let lockedSessionId: string | undefined;
     try {
       await draft.start();
-      const text = typeof prompt === "string" ? prompt : await prompt(controller.signal, draft);
+      const prepared = typeof prompt === "string" ? prompt : await prompt(controller.signal, draft);
+      const text = typeof prepared === "string" ? prepared : prepared.text;
       controller.signal.throwIfAborted();
       if (!state.sessionId) {
         const session = await dependencies.opencode.createSession(state.directory);
@@ -711,6 +780,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         sessionId,
         directory: state.directory,
         text,
+        ...(typeof prepared === "string" ? {} : { images: prepared.images }),
         ...(ctx.chat && ctx.message
           ? { sourceId: `telegram:${ctx.chat.id}:${ctx.message.message_id}` }
           : {}),
