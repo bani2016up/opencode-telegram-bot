@@ -215,10 +215,15 @@ class Ledger:
             db.execute("CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, payload TEXT NOT NULL, status TEXT NOT NULL, created TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0)")
         self.database.chmod(0o600)
 
+    @contextlib.contextmanager
     def connect(self):
         db = sqlite3.connect(self.database, timeout=30)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     @contextlib.contextmanager
     def lock(self):
