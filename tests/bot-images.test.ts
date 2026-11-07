@@ -11,6 +11,7 @@ import { parseConfig } from "../src/config.js";
 import type { OpenCodeGateway } from "../src/opencode.js";
 import { Store } from "../src/store.js";
 import type { ImageLoader } from "../src/images.js";
+import { DiagnosticError } from "../src/observability.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -51,11 +52,12 @@ async function setup() {
     url: "data:image/png;base64,aW1hZ2U=",
   };
   const imageLoader = { load: vi.fn<ImageLoader["load"]>().mockResolvedValue(image) };
+  const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const bot = createTelegramBot(config, {
     store,
     opencode,
     imageLoader,
-    logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    logger,
   });
   bot.botInfo = {
     id: 333,
@@ -154,10 +156,120 @@ async function setup() {
     store.close();
     await rm(directory, { recursive: true, force: true });
   });
-  return { store, opencode, imageLoader, image, calls, send, photo, click, finished, directory };
+  return {
+    store,
+    opencode,
+    imageLoader,
+    image,
+    calls,
+    send,
+    photo,
+    click,
+    finished,
+    directory,
+    logger,
+    bot,
+  };
 }
 
 describe("image messages", () => {
+  it("correlates an album from collection through response delivery without logging contents", async () => {
+    const test = await setup();
+    await test.photo(111, "private", { media_group_id: "album-log", caption: "PRIVATE CAPTION" });
+    await test.photo(111, "private", { media_group_id: "album-log", caption: undefined });
+    await expect
+      .poll(() => test.calls.some((call) => call.method === "sendRichMessage"), { timeout: 3000 })
+      .toBe(true);
+    await expect
+      .poll(() => test.logger.info.mock.calls.some(([event]) => event === "request.completed"))
+      .toBe(true);
+    for (const event of [
+      "request.started",
+      "images.collected",
+      "image.downloaded",
+      "opencode.completed",
+      "request.completed",
+    ])
+      expect(test.logger.info).toHaveBeenCalledWith(
+        event,
+        expect.objectContaining({ requestId: "telegram:111:album:album-log" }),
+      );
+    expect(test.logger.info).toHaveBeenCalledWith(
+      "image.downloaded",
+      expect.objectContaining({ imageIndex: 2, imageCount: 2 }),
+    );
+    expect(JSON.stringify(test.logger.info.mock.calls)).not.toMatch(
+      /PRIVATE CAPTION|aW1hZ2U=|Record today's expenses/,
+    );
+  });
+
+  it("logs the original image failure before a failed error reply and releases the request", async () => {
+    const test = await setup();
+    test.imageLoader.load.mockRejectedValueOnce(
+      new DiagnosticError("Could not download the image from Telegram.", {
+        httpStatus: 503,
+        operation: "telegram.image.download",
+        receivedBytes: 0,
+      }),
+    );
+    test.bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === "sendMessage") {
+        expect(test.logger.error).toHaveBeenCalledWith(
+          "request.failed",
+          expect.objectContaining({
+            requestId: "telegram:111:message:1",
+            stage: "telegram.image.download",
+            imageIndex: 1,
+            httpStatus: 503,
+            modelCompleted: false,
+          }),
+        );
+        throw Object.assign(new Error("private-token"), { error_code: 429 });
+      }
+      return previous(method, payload, signal);
+    });
+    await test.photo();
+    await expect
+      .poll(() =>
+        test.logger.error.mock.calls.some(([event]) => event === "request.delivery.failed"),
+      )
+      .toBe(true);
+    expect(test.opencode.runPrompt).not.toHaveBeenCalled();
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "telegram.error_reply.failed",
+      expect.objectContaining({ httpStatus: 429 }),
+    );
+    expect(JSON.stringify(test.logger.error.mock.calls)).not.toContain("private-token");
+    await test.photo();
+    await test.finished();
+    expect(test.opencode.runPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("distinguishes failed response delivery from a successful model run", async () => {
+    const test = await setup();
+    test.bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === "sendRichMessage" || method === "sendMessage")
+        throw Object.assign(new Error("private response"), { error_code: 403 });
+      return previous(method, payload, signal);
+    });
+    await test.photo();
+    await expect
+      .poll(() => test.logger.error.mock.calls.some(([event]) => event === "request.failed"))
+      .toBe(true);
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "request.failed",
+      expect.objectContaining({
+        stage: "telegram.response.send",
+        modelCompleted: true,
+        httpStatus: 403,
+      }),
+    );
+    expect(test.logger.info.mock.calls.some(([event]) => event === "request.completed")).toBe(
+      false,
+    );
+    expect(JSON.stringify(test.logger.error.mock.calls)).not.toContain("private response");
+  });
+
   it("submits the largest photo and caption in the existing session with a stable source ID", async () => {
     const test = await setup();
     await test.photo();

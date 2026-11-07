@@ -7,6 +7,7 @@ import { ImageAlbum } from "./image-album.js";
 import { MAX_IMAGE_BYTES, TelegramImageLoader } from "./images.js";
 import type { ImageAttachment, ImageLoader } from "./images.js";
 import type { Logger } from "./logger.js";
+import { DiagnosticError, errorDetails, RequestTrace } from "./observability.js";
 import { sanitizeRichMarkdown, splitRichMarkdown } from "./markdown.js";
 import type {
   ModelOption,
@@ -71,6 +72,31 @@ interface UserPayload {
 
 const PAGE_SIZE = 8;
 
+function requestContext(ctx: Context): Record<string, unknown> {
+  const message = ctx.message;
+  return {
+    requestId: message?.media_group_id
+      ? `telegram:${ctx.chat?.id}:album:${message.media_group_id}`
+      : `telegram:${ctx.chat?.id}:message:${message?.message_id ?? ctx.update.update_id}`,
+    updateId: ctx.update.update_id,
+    userId: ctx.from?.id,
+    chatId: ctx.chat?.id,
+    messageId: message?.message_id,
+    ...(message?.media_group_id ? { mediaGroupId: message.media_group_id } : {}),
+    inputType: message?.photo
+      ? "photo"
+      : message?.document
+        ? "document"
+        : message?.video
+          ? "video"
+          : message?.voice
+            ? "voice"
+            : message?.text
+              ? "text"
+              : "control",
+  };
+}
+
 export function createTelegramBot(config: AppConfig, dependencies: Dependencies): Bot {
   const bot = new Bot(config.telegramToken);
   const activeRuns = new Map<number, ActiveRun>();
@@ -89,6 +115,13 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     if (ctx.chat?.type !== "private" || !ctx.from || ctx.from.is_bot) return undefined;
     return ctx.from.id;
   };
+
+  bot.use(async (ctx, next) => {
+    const userId = privateUser(ctx);
+    if (userId && authorized(userId))
+      dependencies.logger.info("telegram.update.received", requestContext(ctx));
+    await next();
+  });
 
   async function sendMenu(ctx: Context, userId: number): Promise<void> {
     const state = await getValidatedState(userId);
@@ -166,7 +199,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       } catch (error) {
         dependencies.logger.warn("Could not deliver an access request to an administrator", {
           adminId,
-          error: String(error),
+          ...errorDetails(error),
         });
       }
     }
@@ -245,7 +278,6 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     }
     dependencies.logger.warn("Resetting invalid persisted workspace", {
       userId,
-      directory: state.directory,
     });
     return dependencies.store.updateChatState(userId, config.defaultWorkdir, {
       directory: config.defaultWorkdir,
@@ -404,7 +436,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
             await ctx.deleteMessage();
           } catch (error) {
             dependencies.logger.warn("Could not remove an approved permission message", {
-              error: safeError(error),
+              ...errorDetails(error),
             });
             await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
           }
@@ -541,6 +573,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       return;
     }
     if (busyUsers.has(userId)) {
+      dependencies.logger.warn("request.rejected", { ...requestContext(ctx), reason: "busy" });
       await ctx.reply("A request is already running. Use Abort before sending another.");
       return;
     }
@@ -565,7 +598,8 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       const saved = dependencies.store.getTranscriptionModel(userId);
       const modelId =
         settings.models.find((model) => model.id === saved)?.id ?? settings.defaultModel;
-      void processPrompt(ctx, userId, state, async (signal, draft) => {
+      void processPrompt(ctx, userId, state, async (signal, draft, trace) => {
+        trace.setStage("telegram.voice.get_file", { modelId, durationSeconds: voice.duration });
         draft.update("Listening to your voice message…");
         let filePath: string | undefined;
         try {
@@ -575,11 +609,15 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
             signal as unknown as Parameters<typeof bot.api.getFile>[1],
           );
           filePath = file.file_path;
-        } catch {
+        } catch (error) {
           signal.throwIfAborted();
-          throw new Error("Could not retrieve the voice message from Telegram.");
+          throw new DiagnosticError("Could not retrieve the voice message from Telegram.", {
+            ...errorDetails(error),
+            operation: "telegram.getFile",
+          });
         }
         if (!filePath) throw new Error("Telegram did not provide an audio file.");
+        trace.setStage("voice.transcribe", { modelId });
         const text = (await transcriber.transcribe(filePath, modelId, signal)).trim();
         signal.throwIfAborted();
         if (!authorized(userId)) throw new Error("Access was revoked while transcribing.");
@@ -588,6 +626,8 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
           throw new Error(
             `Transcript too long. The limit is ${config.maxPromptLength} characters.`,
           );
+        trace.log("voice.transcribed", { transcriptLength: text.length });
+        trace.setStage("telegram.transcript.send");
         for (const [index, chunk] of plainChunks(text).entries()) {
           await ctx.reply(`${index === 0 ? "Heard:\n" : ""}${chunk}`, {
             disable_notification: true,
@@ -596,7 +636,12 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         }
         draft.update("Working on your request…");
         return text;
-      }).catch(() => dependencies.logger.error("Voice request delivery failed", { userId }));
+      }).catch((error) =>
+        dependencies.logger.error("request.delivery.failed", {
+          ...requestContext(ctx),
+          ...errorDetails(error),
+        }),
+      );
     } catch (error) {
       busyUsers.delete(userId);
       throw error;
@@ -617,6 +662,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     const existing = albumKey ? albums.get(albumKey) : undefined;
     if (existing) {
       const result = existing.batch.add(ctx.message.message_id, ctx);
+      dependencies.logger.info("album.item", { ...requestContext(ctx), result });
       if (result === "closed" && !existing.lateWarningSent) {
         existing.lateWarningSent = true;
         await ctx.reply(
@@ -636,6 +682,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       }
     }
     if (busyUsers.has(userId)) {
+      dependencies.logger.warn("request.rejected", { ...requestContext(ctx), reason: "busy" });
       album?.close();
       if (albumKey) albums.get(albumKey)!.lateWarningSent = true;
       await ctx.reply("A request is already running. Use Abort before sending another.");
@@ -651,9 +698,12 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         await ctx.reply("Send the workspace path as text before sending an image.");
         return;
       }
-      void processPrompt(ctx, userId, state, async (signal, draft) => {
+      void processPrompt(ctx, userId, state, async (signal, draft, trace) => {
+        trace.setStage(album ? "album.collect" : "image.prepare");
         if (album) draft.update("Collecting your album…");
         const members = album ? await album.collect(signal) : [ctx];
+        trace.log("images.collected", { imageCount: members.length });
+        trace.setStage("images.validate", { imageCount: members.length });
         if (!authorized(userId)) throw new Error("Access was revoked while collecting images.");
         const captions = members
           .map((member, index) => ({ index, text: member.message?.caption?.trim() }))
@@ -685,6 +735,8 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         let totalBytes = 0;
         for (const attachment of attachments) {
           signal.throwIfAborted();
+          const imageFields = { imageIndex: images.length + 1, imageCount: attachments.length };
+          trace.setStage("telegram.image.get_file", imageFields);
           draft.update(`Opening image ${images.length + 1} of ${attachments.length}…`);
           let filePath: string | undefined;
           try {
@@ -693,13 +745,22 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
               signal as unknown as Parameters<typeof bot.api.getFile>[1],
             );
             filePath = file.file_path;
-          } catch {
+          } catch (error) {
             signal.throwIfAborted();
-            throw new Error("Could not retrieve an image from Telegram. No images were submitted.");
+            throw new DiagnosticError(
+              "Could not retrieve an image from Telegram. No images were submitted.",
+              {
+                ...errorDetails(error),
+                operation: "telegram.getFile",
+              },
+            );
           }
           if (!filePath) throw new Error("Telegram did not provide an image file.");
+          trace.setStage("telegram.image.download", imageFields);
           const image = await imageLoader.load(filePath, signal);
-          totalBytes += Buffer.byteLength(image.url.slice(image.url.indexOf(",") + 1), "base64");
+          const bytes = Buffer.byteLength(image.url.slice(image.url.indexOf(",") + 1), "base64");
+          totalBytes += bytes;
+          trace.log("image.downloaded", { ...imageFields, bytes, totalBytes, mime: image.mime });
           if (totalBytes > MAX_IMAGE_BYTES)
             throw new Error("Images must total at most 20 MB per request.");
           signal.throwIfAborted();
@@ -716,7 +777,12 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         draft.update("Working on your images…");
         return { text, images, ...(albumKey ? { sourceId: albumKey } : {}) };
       })
-        .catch(() => dependencies.logger.error("Image request delivery failed", { userId }))
+        .catch((error) =>
+          dependencies.logger.error("request.delivery.failed", {
+            ...requestContext(ctx),
+            ...errorDetails(error),
+          }),
+        )
         .finally(() => album?.close());
     } catch (error) {
       album?.close();
@@ -733,6 +799,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       return;
     }
     if (busyUsers.has(userId)) {
+      dependencies.logger.warn("request.rejected", { ...requestContext(ctx), reason: "busy" });
       await ctx.reply(
         "OpenCode is already processing a request. Use Abort before sending another.",
       );
@@ -740,6 +807,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     }
     const state = await getValidatedState(userId);
     if (busyUsers.has(userId)) {
+      dependencies.logger.warn("request.rejected", { ...requestContext(ctx), reason: "busy" });
       await ctx.reply("A request is already running. Use Abort before sending another.");
       return;
     }
@@ -763,11 +831,17 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       prompt = skillPrompt(invocation.skill, invocation.arguments);
     }
     if (busyUsers.has(userId)) {
+      dependencies.logger.warn("request.rejected", { ...requestContext(ctx), reason: "busy" });
       await ctx.reply("A request is already running. Use Abort before sending another.");
       return;
     }
     busyUsers.add(userId);
-    void processPrompt(ctx, userId, state, prompt);
+    void processPrompt(ctx, userId, state, prompt).catch((error) =>
+      dependencies.logger.error("request.delivery.failed", {
+        ...requestContext(ctx),
+        ...errorDetails(error),
+      }),
+    );
   });
 
   async function handleWorkspaceInput(ctx: Context, userId: number, input: string): Promise<void> {
@@ -803,9 +877,11 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       | ((
           signal: AbortSignal,
           draft: ThinkingDraft,
+          trace: RequestTrace,
         ) => Promise<string | { text: string; images: ImageAttachment[]; sourceId?: string }>),
   ): Promise<void> {
-    const draft = new ThinkingDraft(bot.api, userId, config.streamIntervalMs);
+    const trace = new RequestTrace(dependencies.logger, requestContext(ctx));
+    const draft = new ThinkingDraft(bot.api, userId, config.streamIntervalMs, trace);
     const controller = new AbortController();
     activeRuns.set(userId, {
       controller,
@@ -815,12 +891,17 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     });
     let state = initialState;
     let lockedSessionId: string | undefined;
+    let modelCompleted = false;
     try {
+      trace.setStage("telegram.draft.start");
       await draft.start();
-      const prepared = typeof prompt === "string" ? prompt : await prompt(controller.signal, draft);
+      trace.setStage("input.prepare");
+      const prepared =
+        typeof prompt === "string" ? prompt : await prompt(controller.signal, draft, trace);
       const text = typeof prepared === "string" ? prepared : prepared.text;
       controller.signal.throwIfAborted();
       if (!state.sessionId) {
+        trace.setStage("opencode.session.create");
         const session = await dependencies.opencode.createSession(state.directory);
         if (controller.signal.aborted)
           throw new DOMException("The operation was aborted", "AbortError");
@@ -841,7 +922,15 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         sessionId,
         draftId: draft.draftId,
       });
+      trace.annotate({ sessionId, providerId: state.providerId, modelId: state.modelId });
+      trace.setStage("opencode.run", {
+        sessionId,
+        providerId: state.providerId,
+        modelId: state.modelId,
+        imageCount: typeof prepared === "string" ? 0 : prepared.images.length,
+      });
       const final = await dependencies.opencode.runPrompt({
+        trace,
         sessionId,
         directory: state.directory,
         text,
@@ -863,14 +952,32 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         onActivity: async (activity) =>
           handleActivity(ctx, userId, state.directory, activity, draft),
       });
+      modelCompleted = true;
+      trace.log("opencode.completed", { sessionId, responseLength: final.length });
       draft.finish();
-      await sendFinal(ctx, final);
+      trace.setStage("telegram.response.send");
+      await sendFinal(ctx, final, trace);
+      trace.log("request.completed", { sessionId });
     } catch (error) {
       draft.finish();
       const aborted = error instanceof Error && error.name === "AbortError";
-      await ctx.reply(aborted ? "OpenCode was stopped." : `OpenCode failed: ${safeError(error)}`);
-      dependencies.logger.error("OpenCode prompt failed", { userId, error: safeError(error) });
+      trace.log(
+        aborted ? "request.cancelled" : "request.failed",
+        {
+          ...errorDetails(error),
+          modelCompleted,
+        },
+        aborted ? "info" : "error",
+      );
+      // Record the original failure before attempting a potentially failing Telegram reply.
+      try {
+        await ctx.reply(aborted ? "OpenCode was stopped." : `OpenCode failed: ${safeError(error)}`);
+      } catch (deliveryError) {
+        trace.log("telegram.error_reply.failed", errorDetails(deliveryError), "error");
+        throw deliveryError;
+      }
     } finally {
+      trace.close();
       activeRuns.delete(userId);
       busyUsers.delete(userId);
       if (lockedSessionId) activeSessionIds.delete(lockedSessionId);
@@ -949,7 +1056,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     );
   }
 
-  async function sendFinal(ctx: Context, markdown: string): Promise<void> {
+  async function sendFinal(ctx: Context, markdown: string, trace: RequestTrace): Promise<void> {
     const safeMarkdown = sanitizeRichMarkdown(markdown);
     const chunks = splitRichMarkdown(safeMarkdown || "OpenCode completed without a text response.");
     try {
@@ -964,7 +1071,8 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
           },
         );
       }
-    } catch {
+    } catch (error) {
+      trace.log("telegram.response.fallback", errorDetails(error), "warn");
       for (const [index, chunk] of plainChunks(safeMarkdown).entries()) {
         await ctx.reply(chunk, { disable_notification: index > 0 });
       }
@@ -973,8 +1081,8 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
 
   bot.catch((error) => {
     dependencies.logger.error("Telegram update failed", {
-      updateId: error.ctx.update.update_id,
-      error: safeError(error.error),
+      ...requestContext(error.ctx),
+      ...errorDetails(error.error),
     });
   });
 

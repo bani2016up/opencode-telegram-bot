@@ -6,6 +6,8 @@ import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/client";
 import type { EventMessagePartDelta, EventPermissionAsked } from "@opencode-ai/sdk/v2/client";
 
 import type { ImageAttachment } from "./images.js";
+import { DiagnosticError, errorDetails } from "./observability.js";
+import type { RequestTrace } from "./observability.js";
 
 export interface ModelOption {
   providerId: string;
@@ -44,6 +46,7 @@ export interface RunPromptOptions {
   sourceId?: string;
   selection: PromptSelection;
   signal: AbortSignal;
+  trace?: RequestTrace;
   onActivity(activity: PromptActivity): Promise<void> | void;
 }
 
@@ -135,6 +138,7 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
   }
 
   async runPrompt(options: RunPromptOptions): Promise<string> {
+    options.trace?.setStage("opencode.events.connect");
     const eventController = new AbortController();
     const subscription = await this.client.event.subscribe({
       query: { directory: options.directory },
@@ -145,6 +149,7 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
     const textParts = new Map<string, string>();
     const reasoningParts = new Map<string, string>();
     const assistantMessageIds = new Set<string>();
+    const loggedToolStates = new Set<string>();
     const messageId = `msg_${randomUUID()}`;
 
     const body: {
@@ -174,6 +179,8 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
     try {
       const connected = await iterator.next();
       if (connected.done) throw new Error("OpenCode event stream closed before connecting");
+      options.trace?.log("opencode.events.connected");
+      options.trace?.setStage("opencode.prompt.submit");
       await this.client.session.promptAsync({
         path: { id: options.sessionId },
         query: { directory: options.directory },
@@ -181,6 +188,8 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
         throwOnError: true,
         signal: options.signal,
       });
+      options.trace?.log("opencode.prompt.accepted", { opencodeMessageId: messageId });
+      options.trace?.setStage("opencode.response.wait");
 
       while (true) {
         const result = await iterator.next();
@@ -197,6 +206,7 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
             message.sessionID === options.sessionId &&
             message.parentID === messageId
           ) {
+            if (assistantMessageIds.size === 0) options.trace?.log("opencode.response.started");
             assistantMessageIds.add(message.id);
             if (message.time.completed && message.finish !== "tool-calls") {
               return (
@@ -224,9 +234,22 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
             part.type === "tool" &&
             (part.state.status === "running" || part.state.status === "completed")
           ) {
+            const toolState = `${part.callID}:${part.state.status}`;
+            if (!loggedToolStates.has(toolState)) {
+              loggedToolStates.add(toolState);
+              options.trace?.log("opencode.tool", { tool: part.tool, status: part.state.status });
+            }
             const title = part.state.title ?? part.tool;
             await options.onActivity({ type: "tool", text: title });
           } else if (part.type === "retry") {
+            options.trace?.log(
+              "opencode.retry",
+              {
+                attempt: part.attempt,
+                ...errorDetails(part.error),
+              },
+              "warn",
+            );
             await options.onActivity({
               type: "retry",
               text: `Retry ${part.attempt}: ${part.error.data.message}`,
@@ -254,6 +277,9 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
           event.properties.sessionID === options.sessionId &&
           (!event.properties.tool || assistantMessageIds.has(event.properties.tool.messageID))
         ) {
+          options.trace?.log("opencode.permission.requested", {
+            permissionId: event.properties.id,
+          });
           await options.onActivity({
             type: "permission",
             request: {
@@ -286,7 +312,10 @@ export class SdkOpenCodeGateway implements OpenCodeGateway {
           event.type === "session.error" &&
           event.properties.sessionID === options.sessionId
         ) {
-          throw new Error(getErrorMessage(event.properties.error));
+          throw new DiagnosticError(getErrorMessage(event.properties.error), {
+            ...errorDetails(event.properties.error),
+            operation: "opencode.session",
+          });
         }
       }
     } finally {

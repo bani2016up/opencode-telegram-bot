@@ -1,10 +1,69 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { TelegramImageLoader } from "../src/images.js";
+import { errorDetails } from "../src/observability.js";
 
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
 
 describe("TelegramImageLoader", () => {
+  it("retains HTTP failure metadata without response bodies or credential URLs", async () => {
+    const download = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("secret body", { status: 503 }));
+    const error = await new TelegramImageLoader("secret-token", download)
+      .load("photos/private.png", new AbortController().signal)
+      .catch((error: unknown) => error);
+    expect(errorDetails(error)).toMatchObject({
+      operation: "telegram.image.download",
+      reason: "http_error",
+      phase: "connect",
+      httpStatus: 503,
+      receivedBytes: 0,
+      durationMs: expect.any(Number),
+    });
+    expect(JSON.stringify(errorDetails(error))).not.toMatch(/secret|private/);
+    expect(download).toHaveBeenCalledTimes(1);
+  });
+
+  it("distinguishes a partial body reset from a connection failure", async () => {
+    const cause = Object.assign(new Error("https://api.telegram.org/file/botsecret/private"), {
+      code: "ECONNRESET",
+    });
+    let pulls = 0;
+    const download = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("fetch failed", { cause }))
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (pulls++ === 0) controller.enqueue(png);
+              else controller.error(cause);
+            },
+          }),
+        ),
+      );
+    const loader = new TelegramImageLoader("secret", download);
+    const connection = await loader
+      .load("photos/a.png", new AbortController().signal)
+      .catch((error: unknown) => error);
+    expect(errorDetails(connection)).toMatchObject({
+      phase: "connect",
+      networkCodes: ["ECONNRESET"],
+      receivedBytes: 0,
+    });
+    const body = await loader
+      .load("photos/a.png", new AbortController().signal)
+      .catch((error: unknown) => error);
+    expect(errorDetails(body)).toMatchObject({
+      phase: "read_body",
+      httpStatus: 200,
+      networkCodes: ["ECONNRESET"],
+      receivedBytes: png.length,
+    });
+    expect(JSON.stringify(errorDetails(body))).not.toMatch(/secret|private/);
+  });
+
   it.each([
     [png, "image/png", "image.png"],
     [Buffer.from([255, 216, 255, 224]), "image/jpeg", "image.jpg"],

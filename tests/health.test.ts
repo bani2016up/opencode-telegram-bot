@@ -5,6 +5,38 @@ import { describe, expect, it, vi } from "vitest";
 import { createHealthServer, PollingHealth, startHealthServer } from "../src/health.js";
 
 describe("polling readiness", () => {
+  it("logs polling failure and recovery once per transition without Telegram payloads", async () => {
+    let now = 0;
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const health = new PollingHealth(() => now, logger);
+    const request = vi.fn().mockResolvedValue({ ok: true, result: [{ text: "private text" }] });
+    await health.track(request, "getUpdates", {});
+    await health.track(request, "getUpdates", {});
+    expect(logger.info).toHaveBeenCalledTimes(1);
+    const error = Object.assign(new Error("private-token"), { code: "ECONNRESET" });
+    request.mockRejectedValue(error);
+    for (let i = 0; i < 2; i++)
+      await expect(health.track(request, "getUpdates", {})).rejects.toThrow();
+    expect(
+      logger.warn.mock.calls.filter(([event]) => event === "telegram.polling.failed"),
+    ).toHaveLength(1);
+    request.mockResolvedValue({ ok: true, result: [] });
+    await health.track(request, "getUpdates", {});
+    expect(logger.info).toHaveBeenLastCalledWith("telegram.polling.state", {
+      reason: "ready",
+      previousReason: "polling_failed",
+    });
+    now = 90_001;
+    expect(health.reason).toBe("polling_stale");
+    expect(logger.warn).toHaveBeenLastCalledWith("telegram.polling.state", {
+      reason: "polling_stale",
+      previousReason: "ready",
+    });
+    expect(JSON.stringify([logger.info.mock.calls, logger.warn.mock.calls])).not.toContain(
+      "private",
+    );
+  });
+
   it("reports startup, polling failures, recovery, stale polling, and shutdown", async () => {
     let now = 0;
     const health = new PollingHealth(() => now);

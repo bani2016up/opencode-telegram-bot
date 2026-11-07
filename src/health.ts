@@ -4,31 +4,57 @@ import { performance } from "node:perf_hooks";
 
 import type { Transformer } from "grammy";
 
+import type { Logger } from "./logger.js";
+import { errorDetails } from "./observability.js";
+
 export class PollingHealth {
   private lastSuccess: number | undefined;
   private failed = false;
+  private reportedReason: string | undefined;
   stopping = false;
 
-  constructor(private readonly clock: () => number = () => performance.now()) {}
+  constructor(
+    private readonly clock: () => number = () => performance.now(),
+    private readonly logger?: Logger,
+  ) {}
 
   get reason(): string {
-    if (this.stopping) return "stopping";
-    if (this.failed) return "polling_failed";
-    if (this.lastSuccess === undefined) return "starting";
-    if (this.clock() - this.lastSuccess > 90_000) return "polling_stale";
-    return "ready";
+    const reason = this.stopping
+      ? "stopping"
+      : this.failed
+        ? "polling_failed"
+        : this.lastSuccess === undefined
+          ? "starting"
+          : this.clock() - this.lastSuccess > 90_000
+            ? "polling_stale"
+            : "ready";
+    if (reason !== this.reportedReason) {
+      this.logger?.[reason === "polling_failed" || reason === "polling_stale" ? "warn" : "info"](
+        "telegram.polling.state",
+        { reason, previousReason: this.reportedReason },
+      );
+      this.reportedReason = reason;
+    }
+    return reason;
   }
 
   readonly track: Transformer = async (previous, method, payload, signal) => {
     try {
       const result = await previous(method, payload, signal);
       if (method === "getUpdates") {
+        if (!result.ok && !this.failed)
+          this.logger?.warn("telegram.polling.failed", errorDetails(result));
         this.failed = !result.ok;
         if (result.ok) this.lastSuccess = this.clock();
+        void this.reason;
       }
       return result;
     } catch (error) {
-      if (method === "getUpdates") this.failed = true;
+      if (method === "getUpdates") {
+        if (!this.failed) this.logger?.warn("telegram.polling.failed", errorDetails(error));
+        this.failed = true;
+        void this.reason;
+      }
       throw error;
     }
   };

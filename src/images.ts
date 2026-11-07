@@ -1,3 +1,7 @@
+import { performance } from "node:perf_hooks";
+
+import { DiagnosticError, errorDetails } from "./observability.js";
+
 export const MAX_IMAGE_BYTES = 20_000_000;
 
 export interface ImageAttachment {
@@ -40,18 +44,28 @@ export class TelegramImageLoader implements ImageLoader {
     const timeout = AbortSignal.timeout(60_000);
     const combined = AbortSignal.any([signal, timeout]);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const started = performance.now();
+    let phase = "connect";
+    let httpStatus: number | undefined;
+    let receivedBytes = 0;
+    let reason = "transport_error";
     try {
       const response = await this.fetchImage(
         `https://api.telegram.org/file/bot${this.telegramToken}/${filePath}`,
         { signal: combined, redirect: "error" },
       );
+      httpStatus = response.status;
       if (!response.ok || !response.body) {
+        reason = response.ok ? "empty_body" : "http_error";
         await response.body?.cancel();
         throw new ImageError("Could not download the image from Telegram.");
       }
+      phase = "read_body";
       reader = response.body.getReader();
-      if (Number(response.headers.get("content-length")) > this.maxBytes)
+      if (Number(response.headers.get("content-length")) > this.maxBytes) {
+        reason = "size_limit";
         throw new ImageError("The image exceeds the 20 MB download limit.");
+      }
       const chunks: Uint8Array[] = [];
       let size = 0;
       while (true) {
@@ -59,11 +73,16 @@ export class TelegramImageLoader implements ImageLoader {
         const { value, done } = await reader.read();
         if (done) break;
         size += value.byteLength;
-        if (size > this.maxBytes)
+        receivedBytes = size;
+        if (size > this.maxBytes) {
+          reason = "size_limit";
           throw new ImageError("The image exceeds the 20 MB download limit.");
+        }
         chunks.push(value);
       }
       combined.throwIfAborted();
+      phase = "validate_format";
+      reason = "unsupported_format";
       const bytes = Buffer.concat(chunks, size);
       const { mime, extension } = imageType(bytes);
       return {
@@ -73,10 +92,23 @@ export class TelegramImageLoader implements ImageLoader {
       };
     } catch (error) {
       signal.throwIfAborted();
-      if (timeout.aborted) throw new ImageError("Image download timed out. Please try again.");
-      if (error instanceof ImageError) throw error;
       // Fetch and stream errors can contain the bot token in the download URL.
-      throw new ImageError("Could not download the image from Telegram.");
+      throw new DiagnosticError(
+        timeout.aborted
+          ? "Image download timed out. Please try again."
+          : error instanceof ImageError
+            ? error.message
+            : "Could not download the image from Telegram.",
+        {
+          ...errorDetails(error),
+          operation: "telegram.image.download",
+          phase,
+          reason: timeout.aborted ? "timeout" : reason,
+          ...(httpStatus === undefined ? {} : { httpStatus }),
+          receivedBytes,
+          durationMs: Math.round(performance.now() - started),
+        },
+      );
     } finally {
       await reader?.cancel().catch(() => undefined);
     }

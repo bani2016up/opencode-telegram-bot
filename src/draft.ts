@@ -1,5 +1,8 @@
 import type { Api, RawApi } from "grammy";
 
+import { errorDetails } from "./observability.js";
+import type { RequestTrace } from "./observability.js";
+
 const openingMessages = [
   "Putting the rubber duck on the case…",
   "Consulting the council of semicolons…",
@@ -20,11 +23,13 @@ export class ThinkingDraft {
     openingMessages[Math.floor(Math.random() * openingMessages.length)] ?? openingMessages[0];
   private sent = "";
   private stopped = false;
+  private deliveryFailed = false;
 
   constructor(
     private readonly api: Api<RawApi>,
     private readonly chatId: number,
     private readonly intervalMs: number,
+    private readonly trace?: RequestTrace,
   ) {}
 
   async start(): Promise<void> {
@@ -59,8 +64,13 @@ export class ThinkingDraft {
         { can_stop: true, keep_on_stop: false },
       );
       this.sent = content;
-    } catch {
+      if (this.deliveryFailed) this.trace?.log("telegram.draft.recovered");
+      this.deliveryFailed = false;
+    } catch (error) {
       // Draft updates are best-effort. The final response is still persisted.
+      if (!this.deliveryFailed)
+        this.trace?.log("telegram.draft.failed", errorDetails(error), "warn");
+      this.deliveryFailed = true;
     }
   }
 }

@@ -1,10 +1,11 @@
 import { createServer } from "node:http";
 import type { ServerResponse } from "node:http";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PromptActivity } from "../src/opencode.js";
 import { SdkOpenCodeGateway } from "../src/opencode.js";
+import { errorDetails, RequestTrace } from "../src/observability.js";
 
 const servers: ReturnType<typeof createServer>[] = [];
 
@@ -144,7 +145,10 @@ describe("SdkOpenCodeGateway", () => {
       "opencode",
       "secure-password-123",
     );
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const trace = new RequestTrace(logger, { requestId: "test-request" });
     const result = await gateway.runPrompt({
+      trace,
       sessionId: "session-1",
       directory: "/workspace",
       text: "test",
@@ -158,6 +162,17 @@ describe("SdkOpenCodeGateway", () => {
       onActivity: () => undefined,
     });
 
+    trace.close();
+    const events = logger.info.mock.calls.map(([event]) => event);
+    expect(events.indexOf("opencode.events.connected")).toBeLessThan(
+      events.indexOf("opencode.prompt.accepted"),
+    );
+    expect(events.indexOf("opencode.prompt.accepted")).toBeLessThan(
+      events.indexOf("opencode.response.started"),
+    );
+    expect(JSON.stringify(logger.info.mock.calls)).not.toMatch(
+      /secure-password|aW1hZ2U=|expected answer/,
+    );
     expect(streamAuthenticated).toBe(true);
     expect(result).toBe("expected answer");
     expect(submittedSystem).toContain("Trusted request reference: telegram:111:123.");
@@ -414,7 +429,9 @@ describe("current OpenCode events", () => {
         .writeHead(400, { "content-type": "application/json" })
         .end(JSON.stringify({ message: "Rejected prompt" }));
     });
-    await expect(test.gateway.runPrompt(prompt)).rejects.toBeDefined();
+    const error = await test.gateway.runPrompt(prompt).catch((error: unknown) => error);
+    expect(errorDetails(error)).toMatchObject({ httpStatus: 400 });
+    expect(JSON.stringify(errorDetails(error))).not.toContain("Rejected prompt");
     await expect.poll(test.closed).toBe(true);
   });
 

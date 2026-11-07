@@ -149,6 +149,8 @@ To switch directories, press **Workspace** and send an absolute path or a path b
 
 ## Streaming
 
+See [application logging](docs/logging.md) for request tracing, safe failure metadata, and Docker log queries.
+
 The bot immediately creates an ephemeral `sendRichMessageDraft` preview. OpenCode `reasoning` and tool events update the same draft at a throttled interval. Telegram's native Stop button aborts the active OpenCode session.
 
 When OpenCode becomes idle, the bot sanitizes the final Markdown and sends a persistent `sendRichMessage`. The draft disappears automatically. Additional chunks are silent to avoid notification spam. User notification settings still determine whether Telegram produces an audible notification.
