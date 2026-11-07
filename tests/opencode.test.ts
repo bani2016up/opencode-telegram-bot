@@ -148,7 +148,10 @@ describe("SdkOpenCodeGateway", () => {
       sessionId: "session-1",
       directory: "/workspace",
       text: "test",
-      images: [{ mime: "image/png", filename: "image.png", url: "data:image/png;base64,aW1hZ2U=" }],
+      images: [
+        { mime: "image/png", filename: "image.png", url: "data:image/png;base64,aW1hZ2U=" },
+        { mime: "image/jpeg", filename: "second.jpg", url: "data:image/jpeg;base64,c2Vjb25k" },
+      ],
       sourceId: "telegram:111:123",
       selection: {},
       signal: new AbortController().signal,
@@ -165,6 +168,12 @@ describe("SdkOpenCodeGateway", () => {
         mime: "image/png",
         filename: "image.png",
         url: "data:image/png;base64,aW1hZ2U=",
+      },
+      {
+        type: "file",
+        mime: "image/jpeg",
+        filename: "second.jpg",
+        url: "data:image/jpeg;base64,c2Vjb25k",
       },
     ]);
     await expect.poll(() => streamClosed).toBe(true);

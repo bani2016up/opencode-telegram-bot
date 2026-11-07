@@ -79,7 +79,11 @@ async function setup() {
       ok: true,
       result:
         method === "getFile"
-          ? { file_id: "image", file_unique_id: "unique", file_path: "photos/test.png" }
+          ? {
+              file_id: "image",
+              file_unique_id: "unique",
+              file_path: `photos/${(payload as { file_id: string }).file_id}.png`,
+            }
           : method === "sendMessage" || method === "sendRichMessage"
             ? {
                 message_id: calls.length,
@@ -276,5 +280,199 @@ describe("image messages", () => {
     await test.photo();
     await test.finished();
     expect(test.opencode.runPrompt).toHaveBeenCalledOnce();
+  });
+});
+
+function albumPhoto(id: number, group = "album", caption = "") {
+  return {
+    message_id: id,
+    media_group_id: group,
+    caption,
+    photo: [
+      {
+        file_id: `photo-${id}`,
+        file_unique_id: `unique-${id}`,
+        width: 1000,
+        height: 1000,
+        file_size: 1000,
+      },
+    ],
+  };
+}
+
+async function albumFinished(test: Awaited<ReturnType<typeof setup>>, count = 1) {
+  await expect
+    .poll(() => test.calls.filter((call) => call.method === "sendRichMessage").length, {
+      timeout: 5000,
+    })
+    .toBe(count);
+}
+
+async function imageFailed(test: Awaited<ReturnType<typeof setup>>, message: string) {
+  await expect
+    .poll(() => test.calls.some((call) => String(call.payload.text).includes(message)), {
+      timeout: 5000,
+    })
+    .toBe(true);
+}
+
+describe("image albums", () => {
+  it("combines out-of-order photos and captions in one request with an album source ID", async () => {
+    const test = await setup();
+    await test.send(albumPhoto(30, "photos", "Third receipt"));
+    await test.send(albumPhoto(10, "photos", "First receipt"));
+    await test.send(albumPhoto(20, "photos"));
+    await test.send(albumPhoto(40, "photos"));
+    await albumFinished(test);
+    expect(test.opencode.runPrompt).toHaveBeenCalledOnce();
+    const prompt = test.opencode.runPrompt.mock.calls[0]![0];
+    expect(prompt).toMatchObject({
+      sessionId: "existing-session",
+      directory: test.directory,
+      sourceId: "telegram:111:album:photos",
+      text: "Image 1: First receipt\n\nImage 3: Third receipt",
+    });
+    expect(prompt.images?.map((image) => image.filename)).toEqual([
+      "image-1.png",
+      "image-2.png",
+      "image-3.png",
+      "image-4.png",
+    ]);
+    expect(
+      test.calls.filter((call) => call.method === "getFile").map((call) => call.payload.file_id),
+    ).toEqual(["photo-10", "photo-20", "photo-30", "photo-40"]);
+    expect(test.calls.some((call) => String(call.payload.text).includes("already running"))).toBe(
+      false,
+    );
+  });
+
+  it("collects document images and retains a caption on a later item", async () => {
+    const test = await setup();
+    await test.send({
+      message_id: 10,
+      media_group_id: "docs",
+      document: { file_id: "one", file_unique_id: "one", mime_type: "image/png" },
+    });
+    await test.send({
+      message_id: 20,
+      media_group_id: "docs",
+      document: { file_id: "two", file_unique_id: "two", mime_type: "image/jpeg" },
+      caption: "Read both receipts.",
+    });
+    await albumFinished(test);
+    expect(test.opencode.runPrompt.mock.calls[0]![0]).toMatchObject({
+      text: "Read both receipts.",
+      images: [expect.any(Object), expect.any(Object)],
+    });
+  });
+
+  it("ignores duplicate deliveries and warns once for late items without starting another task", async () => {
+    const test = await setup();
+    await test.send(albumPhoto(10));
+    await test.send(albumPhoto(10));
+    await test.send(albumPhoto(20));
+    await albumFinished(test);
+    await test.send(albumPhoto(10));
+    await test.send(albumPhoto(30));
+    await test.send(albumPhoto(40));
+    expect(test.opencode.runPrompt).toHaveBeenCalledOnce();
+    expect(test.imageLoader.load).toHaveBeenCalledTimes(2);
+    expect(
+      test.calls.filter((call) =>
+        String(call.payload.text).includes("late image was not included"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("aborts a collecting album without downloading and does not restart it for remaining updates", async () => {
+    const test = await setup();
+    await test.send({ text: "/start" });
+    await test.send(albumPhoto(10));
+    await test.send(albumPhoto(20));
+    await test.click("Abort");
+    await imageFailed(test, "OpenCode was stopped.");
+    await test.send(albumPhoto(30));
+    expect(test.imageLoader.load).not.toHaveBeenCalled();
+    expect(test.opencode.runPrompt).not.toHaveBeenCalled();
+    await test.send({ text: "Next request" });
+    await test.finished();
+  });
+
+  it("rejects the complete album when any download fails", async () => {
+    const test = await setup();
+    test.imageLoader.load
+      .mockResolvedValueOnce(test.image)
+      .mockRejectedValueOnce(new Error("Download failed"));
+    await test.send(albumPhoto(10));
+    await test.send(albumPhoto(20));
+    await imageFailed(test, "Download failed");
+    expect(test.imageLoader.load).toHaveBeenCalledTimes(2);
+    expect(test.opencode.runPrompt).not.toHaveBeenCalled();
+  });
+
+  it("enforces the combined byte budget before downloading", async () => {
+    const test = await setup();
+    for (const id of [10, 20])
+      await test.send({
+        ...albumPhoto(id),
+        document: undefined,
+        photo: [
+          {
+            file_id: String(id),
+            file_unique_id: String(id),
+            width: 1000,
+            height: 1000,
+            file_size: 11_000_000,
+          },
+        ],
+      });
+    await imageFailed(test, "total at most 20 MB");
+    expect(test.imageLoader.load).not.toHaveBeenCalled();
+    expect(test.opencode.runPrompt).not.toHaveBeenCalled();
+  });
+
+  it("refuses a mixed photo/video album instead of submitting only its photos", async () => {
+    const test = await setup();
+    await test.send(albumPhoto(10));
+    await test.send({
+      message_id: 20,
+      media_group_id: "album",
+      video: { file_id: "video", file_unique_id: "video", duration: 1, width: 100, height: 100 },
+    });
+    await imageFailed(test, "not a supported image");
+    expect(test.imageLoader.load).not.toHaveBeenCalled();
+    expect(test.opencode.runPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps different albums and users isolated without busy-message spam", async () => {
+    const test = await setup();
+    test.store.authorize(222, undefined, 111);
+    await test.send(albumPhoto(10, "shared"));
+    await test.send(albumPhoto(20, "shared"));
+    await test.send(albumPhoto(30, "other"));
+    await test.send(albumPhoto(40, "other"));
+    await test.send(albumPhoto(50, "shared"), 222);
+    await test.send(albumPhoto(60, "shared"), 222);
+    await albumFinished(test, 2);
+    const prompts = test.opencode.runPrompt.mock.calls.map(([prompt]) => prompt);
+    expect(prompts.map((prompt) => prompt.sourceId).sort()).toEqual([
+      "telegram:111:album:shared",
+      "telegram:222:album:shared",
+    ]);
+    expect(prompts.every((prompt) => prompt.images?.length === 2)).toBe(true);
+    expect(
+      test.calls.filter((call) => String(call.payload.text).includes("already running")),
+    ).toHaveLength(1);
+  });
+
+  it("rechecks access after collection and before any download", async () => {
+    const test = await setup();
+    test.store.authorize(222, undefined, 111);
+    await test.send(albumPhoto(10), 222);
+    await test.send(albumPhoto(20), 222);
+    test.store.revoke(222);
+    await imageFailed(test, "Access was revoked");
+    expect(test.imageLoader.load).not.toHaveBeenCalled();
+    expect(test.opencode.runPrompt).not.toHaveBeenCalled();
   });
 });

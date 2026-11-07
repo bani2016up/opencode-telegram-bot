@@ -3,6 +3,7 @@ import type { Context } from "grammy";
 
 import type { AppConfig } from "./config.js";
 import { ThinkingDraft } from "./draft.js";
+import { ImageAlbum } from "./image-album.js";
 import { MAX_IMAGE_BYTES, TelegramImageLoader } from "./images.js";
 import type { ImageAttachment, ImageLoader } from "./images.js";
 import type { Logger } from "./logger.js";
@@ -76,6 +77,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
   const busyUsers = new Set<number>();
   const activeSessionIds = new Set<string>();
   const imageLoader = dependencies.imageLoader ?? new TelegramImageLoader(config.telegramToken);
+  const albums = new Map<string, { batch: ImageAlbum<Context>; lateWarningSent: boolean }>();
 
   const authorized = (userId: number) =>
     config.adminUserIds.has(userId) || dependencies.store.isAuthorized(userId);
@@ -601,60 +603,123 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
     }
   });
 
-  bot.on(["message:photo", "message:document"], async (ctx) => {
+  bot.on(["message:photo", "message:document", "message:video"], async (ctx) => {
+    if (ctx.message.video && !ctx.message.media_group_id) return;
     const userId = privateUser(ctx);
     if (!userId) return;
     if (!authorized(userId)) {
       await ctx.reply("Access is not approved. Send /start to request access.");
       return;
     }
+    const albumKey = ctx.message.media_group_id
+      ? `telegram:${ctx.chat.id}:album:${ctx.message.media_group_id}`
+      : undefined;
+    const existing = albumKey ? albums.get(albumKey) : undefined;
+    if (existing) {
+      const result = existing.batch.add(ctx.message.message_id, ctx);
+      if (result === "closed" && !existing.lateWarningSent) {
+        existing.lateWarningSent = true;
+        await ctx.reply(
+          "This album is already closed. A late image was not included; check the result before resending the complete album.",
+        );
+      }
+      return;
+    }
+    const album = albumKey ? new ImageAlbum<Context>() : undefined;
+    if (albumKey && album) {
+      album.add(ctx.message.message_id, ctx);
+      // Keep a bounded recent history so duplicate/late updates cannot start another run.
+      albums.set(albumKey, { batch: album, lateWarningSent: false });
+      if (albums.size > 256) {
+        const oldestClosed = [...albums].find(([, entry]) => entry.batch.closed)?.[0];
+        if (oldestClosed) albums.delete(oldestClosed);
+      }
+    }
     if (busyUsers.has(userId)) {
+      album?.close();
+      if (albumKey) albums.get(albumKey)!.lateWarningSent = true;
       await ctx.reply("A request is already running. Use Abort before sending another.");
-      return;
-    }
-    const photo = ctx.message.photo?.reduce((largest, candidate) =>
-      candidate.width * candidate.height > largest.width * largest.height ? candidate : largest,
-    );
-    const attachment = photo ?? ctx.message.document;
-    if (!attachment) return;
-    if ((attachment.file_size ?? 0) > MAX_IMAGE_BYTES) {
-      await ctx.reply("Images must be at most 20 MB.");
-      return;
-    }
-    const text = ctx.message.caption?.trim() || "Describe this image.";
-    if (text.length > config.maxPromptLength) {
-      await ctx.reply(`Prompt too long. The limit is ${config.maxPromptLength} characters.`);
       return;
     }
     busyUsers.add(userId);
     try {
       const state = await getValidatedState(userId);
       if (state.awaiting === "workspace") {
+        album?.close();
+        if (albumKey) albums.get(albumKey)!.lateWarningSent = true;
         busyUsers.delete(userId);
         await ctx.reply("Send the workspace path as text before sending an image.");
         return;
       }
       void processPrompt(ctx, userId, state, async (signal, draft) => {
-        draft.update("Opening your image…");
-        let filePath: string | undefined;
-        try {
-          const file = await bot.api.getFile(
-            attachment.file_id,
-            signal as unknown as Parameters<typeof bot.api.getFile>[1],
+        if (album) draft.update("Collecting your album…");
+        const members = album ? await album.collect(signal) : [ctx];
+        if (!authorized(userId)) throw new Error("Access was revoked while collecting images.");
+        const captions = members
+          .map((member, index) => ({ index, text: member.message?.caption?.trim() }))
+          .filter((item) => item.text);
+        const text =
+          captions.length === 1
+            ? captions[0]!.text!
+            : captions.length
+              ? captions.map((item) => `Image ${item.index + 1}: ${item.text}`).join("\n\n")
+              : members.length === 1
+                ? "Describe this image."
+                : "Describe these images together.";
+        if (text.length > config.maxPromptLength)
+          throw new Error(`Prompt too long. The limit is ${config.maxPromptLength} characters.`);
+        const attachments = members.map((member) => {
+          const photo = member.message?.photo?.reduce((largest, candidate) =>
+            candidate.width * candidate.height > largest.width * largest.height
+              ? candidate
+              : largest,
           );
-          filePath = file.file_path;
-        } catch {
+          const attachment = photo ?? member.message?.document;
+          if (!attachment)
+            throw new Error("An album item is not a supported image. No images were submitted.");
+          return attachment;
+        });
+        if (attachments.reduce((size, file) => size + (file.file_size ?? 0), 0) > MAX_IMAGE_BYTES)
+          throw new Error("Images must total at most 20 MB per request.");
+        const images: ImageAttachment[] = [];
+        let totalBytes = 0;
+        for (const attachment of attachments) {
           signal.throwIfAborted();
-          throw new Error("Could not retrieve the image from Telegram.");
+          draft.update(`Opening image ${images.length + 1} of ${attachments.length}…`);
+          let filePath: string | undefined;
+          try {
+            const file = await bot.api.getFile(
+              attachment.file_id,
+              signal as unknown as Parameters<typeof bot.api.getFile>[1],
+            );
+            filePath = file.file_path;
+          } catch {
+            signal.throwIfAborted();
+            throw new Error("Could not retrieve an image from Telegram. No images were submitted.");
+          }
+          if (!filePath) throw new Error("Telegram did not provide an image file.");
+          const image = await imageLoader.load(filePath, signal);
+          totalBytes += Buffer.byteLength(image.url.slice(image.url.indexOf(",") + 1), "base64");
+          if (totalBytes > MAX_IMAGE_BYTES)
+            throw new Error("Images must total at most 20 MB per request.");
+          signal.throwIfAborted();
+          if (!authorized(userId)) throw new Error("Access was revoked while downloading.");
+          images.push(
+            attachments.length === 1
+              ? image
+              : {
+                  ...image,
+                  filename: `image-${images.length + 1}.${image.filename.split(".").at(-1)}`,
+                },
+          );
         }
-        if (!filePath) throw new Error("Telegram did not provide an image file.");
-        const image = await imageLoader.load(filePath, signal);
-        signal.throwIfAborted();
-        if (!authorized(userId)) throw new Error("Access was revoked while downloading.");
-        draft.update("Working on your image…");
-        return { text, images: [image] };
-      }).catch(() => dependencies.logger.error("Image request delivery failed", { userId }));
+        draft.update("Working on your images…");
+        return { text, images, ...(albumKey ? { sourceId: albumKey } : {}) };
+      })
+        .catch(() => dependencies.logger.error("Image request delivery failed", { userId }))
+        .finally(() => album?.close());
     } catch (error) {
+      album?.close();
       busyUsers.delete(userId);
       throw error;
     }
@@ -738,7 +803,7 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
       | ((
           signal: AbortSignal,
           draft: ThinkingDraft,
-        ) => Promise<string | { text: string; images: ImageAttachment[] }>),
+        ) => Promise<string | { text: string; images: ImageAttachment[]; sourceId?: string }>),
   ): Promise<void> {
     const draft = new ThinkingDraft(bot.api, userId, config.streamIntervalMs);
     const controller = new AbortController();
@@ -782,7 +847,12 @@ export function createTelegramBot(config: AppConfig, dependencies: Dependencies)
         text,
         ...(typeof prepared === "string" ? {} : { images: prepared.images }),
         ...(ctx.chat && ctx.message
-          ? { sourceId: `telegram:${ctx.chat.id}:${ctx.message.message_id}` }
+          ? {
+              sourceId:
+                typeof prepared !== "string" && prepared.sourceId
+                  ? prepared.sourceId
+                  : `telegram:${ctx.chat.id}:${ctx.message.message_id}`,
+            }
           : {}),
         selection: {
           ...(state.providerId ? { providerId: state.providerId } : {}),

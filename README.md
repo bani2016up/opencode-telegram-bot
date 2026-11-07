@@ -26,12 +26,17 @@ The bot provides Telegram-native authorization, Rich Message streaming, workspac
 
 ## Images
 
-Send one image with a caption describing the task. Photos use the largest Telegram-provided resolution.
+Send an image or a Telegram album with a caption describing the task. Photos use the largest Telegram-provided resolution.
 JPEG, PNG, and WebP documents are accepted up to the [Telegram download limit](https://core.telegram.org/bots/api#getfile) of 20 MB.
 The controller verifies the file signature and sends a data attachment through OpenCode's existing authenticated connection.
 The selected model must support image input. No separate OCR service or API key is required.
 
-Without a caption, the agent is asked to describe the image. Send images individually; albums are not combined into one request.
+Albums are collected by Telegram media-group ID and submitted as one request, in message order, with their captions.
+Collection ends after 1.5 seconds without a new album item. Telegram provides no album-complete event.
+Late items trigger one warning instead of silently creating another task. Duplicate updates are ignored within a bounded recent-album history.
+Send up to 10 images per album, with a combined size of at most 20 MB. The whole request fails if any image cannot be loaded.
+Without a caption, the agent is asked to describe the image or album. Separate albums and unrelated messages remain separate requests.
+Album collection is held in memory; after a controller restart, an interrupted album must be resent and checked against prior results.
 Access checks, the selected session/workspace/model, Abort, and stable Telegram operation references also apply to images.
 Files are downloaded into memory without a controller-side disk copy. OpenCode's conversation history may retain attachments.
 Unsupported or failed downloads return an error instead of being silently ignored.
