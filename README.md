@@ -147,6 +147,16 @@ OpenCode skill names may contain hyphens, while Telegram commands may not. The b
 
 To switch directories, press **Workspace** and send an absolute path or a path beginning with `~/`. Paths are canonicalized and restricted to `ALLOWED_WORKSPACE_ROOTS`. If a path does not exist, the bot lists the deepest existing parent without invoking a shell.
 
+## Optional integrations
+
+The bot works without any domain-specific integrations. Add capabilities to the OpenCode worker
+through MCP servers and skills, with configuration and credentials managed by your deployment.
+
+The [integration guide](integrations/README.md) explains how to connect an existing service or
+build your own module, including a prompt you can give a coding agent. The optional
+[Google Sheets finance integration](integrations/finance/README.md) is a working example you can
+use, customize, or omit. It is not installed or enabled by the bot's npm commands or Docker image.
+
 ## Streaming
 
 See [application logging](docs/logging.md) for request tracing, safe failure metadata, and Docker log queries.

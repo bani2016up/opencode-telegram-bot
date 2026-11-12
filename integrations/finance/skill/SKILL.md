@@ -1,15 +1,15 @@
 ---
-name: prfnv-finance
+name: finance
 description: Record and summarize the owner's personal income, expenses, and transfers in the private Google Sheets journal. Use for financial tracking, monthly reports, and ledger XLSX import/export.
 ---
 
-# PRFNV Finance
+# Personal finance
 
 Google Sheets is the authoritative journal. Use the `finance` MCP tools instead of editing a local master file or issuing arbitrary Sheets API calls.
 
 ## Record
 
-Read `finance_info` for the current local date, workbook link, currency, categories, and queue. Default currency is RUB; do not convert currencies automatically.
+Read `finance_info` for the current local date, workbook link, default currency, categories, and queue. Use its configured currency and timezone unless the owner specifies otherwise; do not assume a currency or convert currencies automatically.
 
 Use positive amounts with at most two decimals. Choose Expense, Income, or Transfer. Ask for missing amounts, unclear dates, and ambiguous accounts. A transfer needs two distinct accounts in the same currency. Never invent financial facts.
 

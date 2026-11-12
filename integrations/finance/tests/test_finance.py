@@ -1,6 +1,7 @@
 import copy
 import datetime as dt
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from unittest.mock import patch
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from finance import EPOCH, HEADERS, SCHEMA, FinanceError, GoogleSheets, Ledger, TemporaryFailure, fingerprint, normalize_operation
+from finance import EPOCH, HEADERS, SCHEMA, FinanceError, GoogleSheets, Ledger, TemporaryFailure, fingerprint, load_config, normalize_operation
 
 
 def operation(**changes):
@@ -66,6 +67,20 @@ class FinanceTests(unittest.TestCase):
                        "retry_seconds": 60}
         self.backend = FakeSheets(self.config)
         self.ledger = Ledger(self.config, self.backend)
+
+    def test_configured_currency_and_timezone_are_used(self):
+        config = {**self.config, "default_currency": "USD", "timezone": "UTC"}
+        ledger = Ledger(config, self.backend)
+        info = ledger.info()
+        self.assertEqual(info["default_currency"], "USD")
+        self.assertEqual(info["timezone"], "UTC")
+        self.assertEqual(info["today"], dt.datetime.now(dt.timezone.utc).date().isoformat())
+        values = operation()
+        del values["currency"]
+        self.assertEqual(ledger.record(**values)["status"], "synced")
+        self.assertEqual(self.backend.data[1][3], "USD")
+        self.assertEqual(ledger.report("2026-11")["expenses"], "125.50")
+        self.assertEqual(ledger.report("2026-11", "RUB")["expenses"], "0.00")
 
     def test_repeated_source_is_one_row_across_process_restart(self):
         self.assertEqual(self.ledger.record(**operation())["status"], "synced")
@@ -190,6 +205,36 @@ class FinanceTests(unittest.TestCase):
         self.ledger.import_confirm("import.xlsx",preview["sha256"])
         self.ledger.import_confirm("import.xlsx",preview["sha256"])
         self.assertEqual(len(self.backend.data),3)
+
+
+class ConfigTests(unittest.TestCase):
+    def test_config_location_must_be_explicit(self):
+        for value in (None, "", "relative/config.json"):
+            env = {} if value is None else {"FINANCE_CONFIG": value}
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(FinanceError, "FINANCE_CONFIG"):
+                    load_config()
+
+    def test_custom_config_preserves_existing_state_and_preferences(self):
+        with tempfile.TemporaryDirectory(prefix="finance config ") as directory:
+            config = json.loads(Path(__file__).parents[1].joinpath("config.example.json").read_text())
+            config.update(spreadsheet_id="a" * 40, state_directory=directory + "/existing-state",
+                          credentials_file=directory + "/service.json", files_directory=directory + "/files",
+                          default_currency="EUR", timezone="Europe/Paris")
+            path = Path(directory) / "custom.json"
+            path.write_text(json.dumps(config))
+            with patch.dict(os.environ, {"FINANCE_CONFIG": str(path)}):
+                self.assertEqual(load_config(), config)
+
+    def test_unreadable_or_invalid_json_has_actionable_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            with patch.dict(os.environ, {"FINANCE_CONFIG": str(path)}):
+                with self.assertRaisesRegex(FinanceError, "Cannot read FINANCE_CONFIG"):
+                    load_config()
+                path.write_text("{not valid json")
+                with self.assertRaisesRegex(FinanceError, "Cannot read FINANCE_CONFIG"):
+                    load_config()
 
 
 if __name__ == "__main__":

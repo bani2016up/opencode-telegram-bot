@@ -458,7 +458,16 @@ class Ledger:
 
 
 def load_config():
-    config = json.loads(Path(os.environ.get("FINANCE_CONFIG", "/etc/prfnv-finance/config.json")).read_text())
+    config_file = os.environ.get("FINANCE_CONFIG")
+    if not config_file:
+        raise FinanceError("Set FINANCE_CONFIG to the absolute path of your finance configuration file.")
+    path = Path(config_file).expanduser()
+    if not path.is_absolute():
+        raise FinanceError("FINANCE_CONFIG must be an absolute path.")
+    try:
+        config = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise FinanceError("Cannot read FINANCE_CONFIG as JSON. Check the file and its permissions.") from None
     if not re.fullmatch(r"[A-Za-z0-9_-]{20,120}", config["spreadsheet_id"]):
         raise FinanceError("Configure a valid spreadsheet ID.")
     for key in ("state_directory", "credentials_file", "files_directory"):
@@ -472,7 +481,7 @@ def load_config():
 
 def serve(ledger):
     from mcp.server.fastmcp import FastMCP
-    mcp = FastMCP("prfnv-finance")
+    mcp = FastMCP("finance")
 
     @mcp.tool()
     def finance_info() -> dict:
@@ -527,7 +536,11 @@ def main():
     parser.add_argument("mode", choices=["stdio", "worker", "info", "report", "sync", "snapshot"])
     parser.add_argument("--month")
     args = parser.parse_args()
-    ledger = Ledger(load_config())
+    try:
+        config = load_config()
+    except FinanceError as error:
+        parser.error(str(error))
+    ledger = Ledger(config)
     if args.mode == "stdio":
         serve(ledger)
     elif args.mode == "worker":
